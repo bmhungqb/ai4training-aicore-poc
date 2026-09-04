@@ -737,48 +737,54 @@ def main() -> None:
     # BẢNG 1: SO SÁNH BASELINE vs OPTION TỐI ƯU CHO TỪNG CÔNG ĐOẠN
     # =========================================================================
     print(f"\n[PHẦN 1] SO SÁNH BASELINE (HIỆN TẠI) vs OPTION TỐI ƯU (FINAL ĐƯỢC CHỌN) [Window = ±{primary_window}s]:")
-    print("-" * 115)
-    h_fmt = "{cd:<4} | {title:<25} | {bounds_col:<15} | {recall_col:<22} | {both_col:<22} | {f1_col:<14}"
+    print("-" * 125)
+    h_fmt = "{cd:<4} | {title:<20} | {bounds_col:<12} | {recall_col:<22} | {prec_col:<20} | {f1_col:<14} | {both_col:<18}"
     print(h_fmt.format(
         cd="CĐ", title="Tên công đoạn",
-        bounds_col="Số ranh giới",
+        bounds_col="Ranh giới",
         recall_col="Boundary Recall",
-        both_col="Thao tác khớp 2 đầu",
-        f1_col="F1-Score"
+        prec_col="Boundary Precision",
+        f1_col="F1-Score",
+        both_col="Khớp CẢ 2 đầu"
     ))
-    print("-" * 115)
+    print("-" * 125)
 
     for r in eval_results:
-        title_disp = (r.sheet_title[:22] + "...") if len(r.sheet_title) > 25 else r.sheet_title
+        title_disp = (r.sheet_title[:18] + "...") if len(r.sheet_title) > 20 else r.sheet_title
 
         # Baseline stats
         b_bounds = len(r.pred_boundaries)
         b_rec = r.get_boundary_recall(primary_window)
+        b_prec = r.get_boundary_precision(primary_window)
+        b_f1 = r.get_boundary_f1(primary_window)
         b_both = r.get_step_both_hits(primary_window)
         b_both_pct = r.get_step_both_pct(primary_window)
-        b_f1 = r.get_boundary_f1(primary_window)
 
         if r.best_tuned_option:
             t = r.best_tuned_option
             t_rec = r.get_tuned_boundary_recall(primary_window)
+            t_prec = r.get_tuned_boundary_precision(primary_window)
+            t_f1 = r.get_tuned_boundary_f1(primary_window)
             t_both = r.get_tuned_step_both_hits(primary_window)
             t_both_pct = r.get_tuned_step_both_pct(primary_window)
-            t_f1 = r.get_tuned_boundary_f1(primary_window)
 
             bounds_str = f"{b_bounds} -> {t.n_bounds}"
             recall_str = f"{b_rec:4.1f}% -> {t_rec:4.1f}% (+{t_rec-b_rec:4.1f}%)"
-            both_str = f"{b_both}/{r.get_total_steps()} -> {t_both}/{r.get_total_steps()} ({t_both_pct:4.1f}%)"
+            prec_str = f"{b_prec:4.1f}% -> {t_prec:4.1f}%"
             f1_str = f"{b_f1:4.1f}% -> {t_f1:4.1f}%"
+            both_str = f"{b_both}/{r.get_total_steps()} -> {t_both}/{r.get_total_steps()} ({t_both_pct:4.1f}%)"
         else:
             bounds_str = f"{b_bounds}"
             recall_str = f"{b_rec:4.1f}%"
-            both_str = f"{b_both}/{r.get_total_steps()} ({b_both_pct:4.1f}%)"
+            prec_str = f"{b_prec:4.1f}%"
             f1_str = f"{b_f1:4.1f}%"
+            both_str = f"{b_both}/{r.get_total_steps()} ({b_both_pct:4.1f}%)"
 
         print(h_fmt.format(
             cd=str(r.cong_doan_id), title=title_disp,
             bounds_col=bounds_str, recall_col=recall_str,
-            both_col=both_str, f1_col=f1_str
+            prec_col=prec_str, f1_col=f1_str,
+            both_col=both_str
         ))
 
         if r.best_tuned_option:
@@ -791,7 +797,7 @@ def main() -> None:
                 save_tuned_action_segments(r.action_segments_path, opt.boundaries, r.fps, r.video_file)
                 print(f"         💾 Đã cập nhật kết quả tối ưu vào: {r.action_segments_path.resolve()}\n")
 
-    print("-" * 115)
+    print("-" * 125)
 
     # In chi tiết so sánh từng thao tác nếu bật --details
     if args.details:
@@ -803,7 +809,7 @@ def main() -> None:
     # BẢNG 2: TỔNG HỢP TOÀN BỘ (MACRO & MICRO) TRƯỚC vs SAU KHI TỐI ƯU
     # =========================================================================
     print(f"\n[PHẦN 2] TỔNG HỢP TOÀN BỘ ({len(eval_results)} công đoạn | Window = ±{primary_window}s):")
-    print("-" * 115)
+    print("-" * 125)
 
     # Baseline overall
     base_macro_rec = sum(r.get_boundary_recall(primary_window) for r in eval_results) / len(eval_results)
@@ -811,16 +817,26 @@ def main() -> None:
     base_micro_hits = sum(r.get_boundary_hits(primary_window) for r in eval_results)
     base_micro_rec = (base_micro_hits / total_gt * 100.0) if total_gt > 0 else 0.0
 
+    total_pred_b = sum(len(r.pred_boundaries) for r in eval_results)
+    base_macro_prec = sum(r.get_boundary_precision(primary_window) for r in eval_results) / len(eval_results)
+    base_pred_hits = sum(
+        sum(1 for p in r.pred_boundaries if any(abs(p - g) <= primary_window for g in r.gt_boundaries))
+        for r in eval_results
+    )
+    base_micro_prec = (base_pred_hits / total_pred_b * 100.0) if total_pred_b > 0 else 0.0
+    base_macro_f1 = sum(r.get_boundary_f1(primary_window) for r in eval_results) / len(eval_results)
+
     total_steps = sum(r.get_total_steps() for r in eval_results)
     base_step_both = sum(r.get_step_both_hits(primary_window) for r in eval_results)
     base_step_both_pct = (base_step_both / total_steps * 100.0) if total_steps > 0 else 0.0
     base_step_either = sum(r.get_step_either_hits(primary_window) for r in eval_results)
     base_step_either_pct = (base_step_either / total_steps * 100.0) if total_steps > 0 else 0.0
-    base_macro_f1 = sum(r.get_boundary_f1(primary_window) for r in eval_results) / len(eval_results)
 
     print(f"  📌 TRẠNG THÁI HIỆN TẠI (BASELINE):")
-    print(f"     • Macro Boundary Recall        : {base_macro_rec:6.2f}%")
-    print(f"     • Micro Boundary Recall        : {base_micro_rec:6.2f}% ({base_micro_hits}/{total_gt} mốc)")
+    print(f"     • Macro Recall                 : {base_macro_rec:6.2f}%")
+    print(f"     • Micro Recall                 : {base_micro_rec:6.2f}% ({base_micro_hits}/{total_gt} mốc GT)")
+    print(f"     • Macro Precision              : {base_macro_prec:6.2f}%")
+    print(f"     • Micro Precision              : {base_micro_prec:6.2f}% ({base_pred_hits}/{total_pred_b} vết cắt của máy)")
     print(f"     • Macro F1-Score               : {base_macro_f1:6.2f}%")
     print(f"     • Thao tác khớp CẢ 2 ĐẦU       : {base_step_both_pct:6.2f}% ({base_step_both}/{total_steps} thao tác)")
     print(f"     • Thao tác khớp ÍT NHẤT 1 ĐẦU  : {base_step_either_pct:6.2f}% ({base_step_either}/{total_steps} thao tác)")
@@ -832,47 +848,63 @@ def main() -> None:
         tuned_micro_hits = sum(r.get_tuned_boundary_hits(primary_window) for r in eval_results)
         tuned_micro_rec = (tuned_micro_hits / total_gt * 100.0) if total_gt > 0 else 0.0
 
+        tuned_total_pred_b = sum(r.best_tuned_option.n_bounds for r in eval_results if r.best_tuned_option)
+        tuned_macro_prec = sum(r.get_tuned_boundary_precision(primary_window) for r in eval_results) / len(eval_results)
+        tuned_pred_hits = sum(
+            sum(1 for p in r.best_tuned_option.pred_times if any(abs(p - g) <= primary_window for g in r.gt_boundaries))
+            for r in eval_results if r.best_tuned_option
+        )
+        tuned_micro_prec = (tuned_pred_hits / tuned_total_pred_b * 100.0) if tuned_total_pred_b > 0 else 0.0
+        tuned_macro_f1 = sum(r.get_tuned_boundary_f1(primary_window) for r in eval_results) / len(eval_results)
+
         tuned_step_both = sum(r.get_tuned_step_both_hits(primary_window) for r in eval_results)
         tuned_step_both_pct = (tuned_step_both / total_steps * 100.0) if total_steps > 0 else 0.0
         tuned_step_either = sum(r.get_tuned_step_either_hits(primary_window) for r in eval_results)
         tuned_step_either_pct = (tuned_step_either / total_steps * 100.0) if total_steps > 0 else 0.0
-        tuned_macro_f1 = sum(r.get_tuned_boundary_f1(primary_window) for r in eval_results) / len(eval_results)
 
         print(f"\n  ⭐ SAU KHI ÁP DỤNG CÁC OPTION TỐI ƯU:")
-        print(f"     • Macro Boundary Recall        : {tuned_macro_rec:6.2f}%  (+{tuned_macro_rec - base_macro_rec:.1f}%) 🚀")
-        print(f"     • Micro Boundary Recall        : {tuned_micro_rec:6.2f}% ({tuned_micro_hits}/{total_gt} mốc) (+{tuned_micro_rec - base_micro_rec:.1f}%)")
+        print(f"     • Macro Recall                 : {tuned_macro_rec:6.2f}%  (+{tuned_macro_rec - base_macro_rec:.1f}%) 🚀")
+        print(f"     • Micro Recall                 : {tuned_micro_rec:6.2f}% ({tuned_micro_hits}/{total_gt} mốc GT) (+{tuned_micro_rec - base_micro_rec:.1f}%)")
+        print(f"     • Macro Precision              : {tuned_macro_prec:6.2f}%  ({tuned_macro_prec - base_macro_prec:+.1f}%)")
+        print(f"     • Micro Precision              : {tuned_micro_prec:6.2f}% ({tuned_pred_hits}/{tuned_total_pred_b} vết cắt của máy)")
         print(f"     • Macro F1-Score               : {tuned_macro_f1:6.2f}%  (+{tuned_macro_f1 - base_macro_f1:.1f}%)")
         print(f"     • Thao tác khớp CẢ 2 ĐẦU       : {tuned_step_both_pct:6.2f}% ({tuned_step_both}/{total_steps} thao tác) (+{tuned_step_both_pct - base_step_both_pct:.1f}%) 🚀")
         print(f"     • Thao tác khớp ÍT NHẤT 1 ĐẦU  : {tuned_step_either_pct:6.2f}% ({tuned_step_either}/{total_steps} thao tác)")
 
     # =========================================================================
-    # BẢNG 3: TOLERANCE WINDOW SWEEP CỦA OPTION TỐI ƯU
+    # BẢNG 3: TOLERANCE WINDOW SWEEP (CẢ RECALL & PRECISION)
     # =========================================================================
     if has_tuning:
-        print(f"\n[PHẦN 3] TIẾN TRÌNH RECALL THEO DẢI WINDOW CỦA OPTION TỐI ƯU:")
-        print("-" * 115)
-        print(f"{'Window':<8} | {'Boundary Recall (Macro / Micro)':<33} | {'Step Khớp 2 Đầu (Micro)':<24} | {'Step Khớp ≥1 Đầu (Micro)':<24} | {'Visual Recall Bar'}")
-        print("-" * 115)
+        print(f"\n[PHẦN 3] TIẾN TRÌNH RECALL & PRECISION THEO DẢI WINDOW CỦA OPTION TỐI ƯU:")
+        print("-" * 125)
+        print(f"{'Window':<8} | {'Recall (Macro / Micro)':<25} | {'Precision (Macro / Micro)':<27} | {'F1-Score':<9} | {'Khớp 2 Đầu':<12} | {'Visual Recall Bar'}")
+        print("-" * 125)
 
         for w in windows:
             m_rec = sum(r.get_tuned_boundary_recall(w) for r in eval_results) / len(eval_results)
             w_hits = sum(r.get_tuned_boundary_hits(w) for r in eval_results)
             u_rec = (w_hits / total_gt * 100.0) if total_gt > 0 else 0.0
 
+            m_prec = sum(r.get_tuned_boundary_precision(w) for r in eval_results) / len(eval_results)
+            w_pred_hits = sum(
+                sum(1 for p in r.best_tuned_option.pred_times if any(abs(p - g) <= w for g in r.gt_boundaries))
+                for r in eval_results if r.best_tuned_option
+            )
+            u_prec = (w_pred_hits / tuned_total_pred_b * 100.0) if tuned_total_pred_b > 0 else 0.0
+
+            f1 = (2 * m_prec * m_rec / (m_prec + m_rec)) if (m_prec + m_rec) > 0 else 0.0
+
             w_both = sum(r.get_tuned_step_both_hits(w) for r in eval_results)
             u_both = (w_both / total_steps * 100.0) if total_steps > 0 else 0.0
-
-            w_either = sum(r.get_tuned_step_either_hits(w) for r in eval_results)
-            u_either = (w_either / total_steps * 100.0) if total_steps > 0 else 0.0
 
             bar = make_ascii_bar(m_rec, width=16)
             marker = " (*)" if w == primary_window else ""
 
             col_b = f"{m_rec:5.1f}% / {u_rec:5.1f}% ({w_hits:2d}/{total_gt:2d})"
+            col_p = f"{m_prec:5.1f}% / {u_prec:5.1f}% ({w_pred_hits:2d}/{tuned_total_pred_b:2d})"
             col_both = f"{u_both:5.1f}% ({w_both:2d}/{total_steps:2d})"
-            col_either = f"{u_either:5.1f}% ({w_either:2d}/{total_steps:2d})"
 
-            print(f"±{w:<5.2f}s | {col_b:<33} | {col_both:<24} | {col_either:<24} | {bar}{marker}")
+            print(f"±{w:<5.2f}s | {col_b:<25} | {col_p:<27} | {f1:5.1f}%   | {col_both:<12} | {bar}{marker}")
 
         print("-" * 115)
         print(" (*) Cửa sổ chuẩn mặc định")
