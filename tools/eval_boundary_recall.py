@@ -437,8 +437,8 @@ def auto_tune_video(npz_file: Path, gt_bounds: list[float], gt_steps: list[dict]
                     bounds = sorted(list(set([0] + peaks + [N - 1])))
                     pred_times = [round(b / fps, 3) for b in bounds]
 
-                    # Penalize extreme over-segmentation (> 2.3x ground-truth)
-                    if len(bounds) > target_count * 2.3:
+                    # Penalize extreme over-segmentation (> 2.8x ground-truth)
+                    if len(bounds) > target_count * 2.8:
                         continue
 
                     # Evaluate at window
@@ -464,7 +464,7 @@ def auto_tune_video(npz_file: Path, gt_bounds: list[float], gt_steps: list[dict]
 
                     # Composite score: F1 + 0.3 * BothEnds% + mild penalty for extra bounds
                     bound_ratio = len(bounds) / max(1, target_count)
-                    density_penalty = max(0.0, (bound_ratio - 1.8) * 5.0)
+                    density_penalty = max(0.0, (bound_ratio - 1.8) * 3.0)
                     score = f1 + 0.3 * both_pct - density_penalty
 
                     if score > best_score:
