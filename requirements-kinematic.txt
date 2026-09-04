@@ -1,0 +1,9 @@
+# Extra dependencies for Phase 1 (src/kinematic_pipeline/): SAM3 hand segmentation +
+# SEA-RAFT optical flow + magnitude/direction fusion. Not needed for Phase 2 (VLM analysis)
+# on its own if you already have a cached data/kinematic/pipe1_report.json.
+torch
+transformers
+scipy
+matplotlib
+huggingface_hub
+requests

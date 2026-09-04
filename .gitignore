@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.env
+.env.*
+
+# archive and sheets
+*.zip
+*.xlsx
+
+# data and outputs
+data/
+data_sp1/
+/tmp
+

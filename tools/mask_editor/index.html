@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mask editor</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; display: flex; height: 100vh; }
+  #sidebar { width: 320px; overflow-y: auto; border-right: 1px solid #ccc; padding: 12px; box-sizing: border-box; }
+  #main { flex: 1; display: flex; flex-direction: column; align-items: center; padding: 16px; box-sizing: border-box; overflow: auto; }
+  .video-item { padding: 8px; border-radius: 6px; cursor: pointer; margin-bottom: 4px; word-break: break-all; font-size: 13px; }
+  .video-item:hover { background: #eef; }
+  .video-item.active { background: #cde; }
+  .video-item .mask-flag { float: right; font-size: 11px; }
+  .has-mask { color: #2a7; }
+  .no-mask { color: #999; }
+  #canvasWrap { position: relative; border: 1px solid #999; touch-action: none; }
+  canvas { display: block; }
+  #toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+  button { padding: 6px 12px; cursor: pointer; }
+  #status { margin-top: 10px; font-size: 13px; color: #555; min-height: 18px; }
+  select, input[type=range] { vertical-align: middle; }
+  .hint { font-size: 12px; color: #777; margin-top: 6px; }
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <h3>Videos</h3>
+  <div id="videoList">Loading…</div>
+</div>
+
+<div id="main">
+  <div id="toolbar">
+    <label>Mode:
+      <select id="modeSelect">
+        <option value="brush">Brush (paint keep-area)</option>
+        <option value="polygon">Polygon (click points, double-click to close)</option>
+      </select>
+    </label>
+    <label>Brush size: <input type="range" id="brushSize" min="5" max="150" value="35"></label>
+    <button id="undoBtn">Undo</button>
+    <button id="clearBtn">Clear mask</button>
+    <button id="invertBtn">Invert</button>
+    <button id="saveBtn">Save mask</button>
+    <button id="toggleMaskBtn">Hide mask</button>
+  </div>
+  <div id="canvasWrap">
+    <canvas id="frameCanvas"></canvas>
+    <canvas id="maskCanvas" style="position:absolute; top:0; left:0; opacity:0.30;"></canvas>
+  </div>
+  <div class="hint">
+    White/painted area = kept (fed to SAM3 / SEA-RAFT). Everything else is zeroed out.
+    Brush mode: click-drag to paint, hold Shift while dragging to erase.
+    Polygon mode: click to add a point, double-click (or Enter) to close and fill the shape.
+    Use <b>Hide mask</b> to see the frame without the overlay.
+  </div>
+  <div id="status"></div>
+</div>
+
+<script>
+const videoListEl = document.getElementById('videoList');
+const frameCanvas = document.getElementById('frameCanvas');
+const maskCanvas = document.getElementById('maskCanvas');
+const fctx = frameCanvas.getContext('2d');
+const mctx = maskCanvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const modeSelect = document.getElementById('modeSelect');
+const brushSizeInput = document.getElementById('brushSize');
+
+let videos = [];
+let current = null;      // {path, width, height}
+let nativeW = 0, nativeH = 0;
+let scale = 1;
+let drawing = false;
+let erasing = false;
+let polygonPoints = [];
+let undoStack = [];
+let maskVisible = true;
+
+function setStatus(msg) { statusEl.textContent = msg; }
+
+async function loadVideos() {
+  const res = await fetch('/api/videos');
+  const data = await res.json();
+  videos = data.videos;
+  renderVideoList();
+}
+
+function renderVideoList() {
+  videoListEl.innerHTML = '';
+  for (const v of videos) {
+    const div = document.createElement('div');
+    div.className = 'video-item' + (current && current.path === v.path ? ' active' : '');
+    div.innerHTML = `${v.path} <span class="mask-flag ${v.has_mask ? 'has-mask' : 'no-mask'}">${v.has_mask ? '● masked' : '○ none'}</span>`;
+    div.onclick = () => selectVideo(v);
+    videoListEl.appendChild(div);
+  }
+}
+
+async function loadMaskForCurrentVideo() {
+  if (!current) return;
+  mctx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+  try {
+    const maskRes = await fetch('/api/mask?path=' + encodeURIComponent(current.path));
+    if (maskRes.ok) {
+      const maskBlob = await maskRes.blob();
+      const maskUrl = URL.createObjectURL(maskBlob);
+      const maskImg = new Image();
+      await new Promise((resolve, reject) => {
+        maskImg.onload = () => { resolve(); };
+        maskImg.onerror = () => { reject(new Error('mask image load error')); };
+        maskImg.src = maskUrl;
+      });
+      mctx.globalCompositeOperation = 'source-over';
+      mctx.drawImage(maskImg, 0, 0, maskCanvas.width, maskCanvas.height);
+      URL.revokeObjectURL(maskUrl);
+    }
+  } catch (err) {
+    console.warn('Could not load mask:', err);
+  }
+}
+
+async function selectVideo(v) {
+  current = v;
+  renderVideoList();
+  setStatus('Loading frame…');
+  polygonPoints = [];
+  undoStack = [];
+
+  const img = new Image();
+  img.onload = async () => {
+    nativeW = img.naturalWidth;
+    nativeH = img.naturalHeight;
+    const maxDisplayW = Math.min(1000, window.innerWidth - 380);
+    scale = Math.min(1, maxDisplayW / nativeW);
+    const dispW = Math.round(nativeW * scale);
+    const dispH = Math.round(nativeH * scale);
+
+    frameCanvas.width = dispW; frameCanvas.height = dispH;
+    maskCanvas.width = dispW; maskCanvas.height = dispH;
+    fctx.drawImage(img, 0, 0, dispW, dispH);
+
+    mctx.clearRect(0, 0, dispW, dispH);
+    await loadMaskForCurrentVideo();
+    saveUndoSnapshot();
+    setStatus(`Loaded ${current.path} (${nativeW}x${nativeH})`);
+  };
+  img.src = '/api/frame?path=' + encodeURIComponent(v.path) + '&t=' + Date.now();
+}
+
+function saveUndoSnapshot() {
+  undoStack.push(mctx.getImageData(0, 0, maskCanvas.width, maskCanvas.height));
+  if (undoStack.length > 30) undoStack.shift();
+}
+
+function canvasPos(evt) {
+  const rect = maskCanvas.getBoundingClientRect();
+  return { x: evt.clientX - rect.left, y: evt.clientY - rect.top };
+}
+
+// -- brush mode ---------------------------------------------------------
+maskCanvas.addEventListener('pointerdown', (evt) => {
+  if (!current) return;
+  if (modeSelect.value === 'polygon') {
+    const p = canvasPos(evt);
+    polygonPoints.push(p);
+    redrawPolygonPreview();
+    return;
+  }
+  drawing = true;
+  erasing = evt.shiftKey;
+  paintAt(canvasPos(evt));
+});
+maskCanvas.addEventListener('pointermove', (evt) => {
+  if (!drawing || modeSelect.value === 'polygon') return;
+  paintAt(canvasPos(evt));
+});
+window.addEventListener('pointerup', () => {
+  if (drawing) saveUndoSnapshot();
+  drawing = false;
+});
+
+function paintAt(p) {
+  const r = parseInt(brushSizeInput.value, 10);
+  mctx.globalCompositeOperation = erasing ? 'destination-out' : 'source-over';
+  mctx.fillStyle = 'rgba(255,255,255,1)';
+  mctx.beginPath();
+  mctx.arc(p.x, p.y, r / 2, 0, Math.PI * 2);
+  mctx.fill();
+}
+
+// -- polygon mode ---------------------------------------------------------
+maskCanvas.addEventListener('dblclick', () => {
+  if (modeSelect.value !== 'polygon' || polygonPoints.length < 3) return;
+  mctx.globalCompositeOperation = 'source-over';
+  mctx.fillStyle = 'rgba(255,255,255,1)';
+  mctx.beginPath();
+  mctx.moveTo(polygonPoints[0].x, polygonPoints[0].y);
+  for (const p of polygonPoints.slice(1)) mctx.lineTo(p.x, p.y);
+  mctx.closePath();
+  mctx.fill();
+  polygonPoints = [];
+  saveUndoSnapshot();
+});
+
+function redrawPolygonPreview() {
+  // redraw last committed state, then overlay the in-progress polygon outline
+  if (undoStack.length) {
+    mctx.putImageData(undoStack[undoStack.length - 1], 0, 0);
+  }
+  if (polygonPoints.length) {
+    mctx.globalCompositeOperation = 'source-over';
+    mctx.strokeStyle = 'lime';
+    mctx.lineWidth = 2;
+    mctx.beginPath();
+    mctx.moveTo(polygonPoints[0].x, polygonPoints[0].y);
+    for (const p of polygonPoints.slice(1)) mctx.lineTo(p.x, p.y);
+    mctx.stroke();
+    for (const p of polygonPoints) {
+      mctx.fillStyle = 'lime';
+      mctx.beginPath();
+      mctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+      mctx.fill();
+    }
+  }
+}
+
+document.addEventListener('keydown', (evt) => {
+  if (evt.key === 'Enter' && modeSelect.value === 'polygon' && polygonPoints.length >= 3) {
+    maskCanvas.dispatchEvent(new Event('dblclick'));
+  }
+});
+
+// -- toolbar --------------------------------------------------------------
+document.getElementById('undoBtn').onclick = () => {
+  if (undoStack.length > 1) {
+    undoStack.pop();
+    mctx.putImageData(undoStack[undoStack.length - 1], 0, 0);
+  }
+};
+document.getElementById('clearBtn').onclick = () => {
+  mctx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+  saveUndoSnapshot();
+};
+document.getElementById('invertBtn').onclick = () => {
+  const img = mctx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const wasPainted = img.data[i + 3] > 0;
+    if (wasPainted) {
+      img.data[i + 3] = 0;
+    } else {
+      img.data[i] = 255; img.data[i + 1] = 255; img.data[i + 2] = 255; img.data[i + 3] = 255;
+    }
+  }
+  mctx.putImageData(img, 0, 0);
+  saveUndoSnapshot();
+};
+
+document.getElementById('saveBtn').onclick = async () => {
+  if (!current) return;
+  setStatus('Saving…');
+
+  // --- Debug: check what maskCanvas contains before saving ---
+  const debugData = mctx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
+  let whiteCount = 0, transparentCount = 0;
+  for (let i = 3; i < debugData.data.length; i += 4) {
+    if (debugData.data[i] === 255) whiteCount++;
+    else if (debugData.data[i] === 0) transparentCount++;
+  }
+  console.log(`[DEBUG SAVE] maskCanvas=${maskCanvas.width}x${maskCanvas.height}, white=${whiteCount}, transparent=${transparentCount}`);
+
+  // render mask onto an off-screen canvas at native resolution before sending
+  const out = document.createElement('canvas');
+  out.width = nativeW; out.height = nativeH;
+  const octx = out.getContext('2d');
+
+  // Get mask pixels at native resolution (upscaled from display canvas)
+  const scaled = octx.drawImage(maskCanvas, 0, 0, nativeW, nativeH);
+  const imgData = octx.getImageData(0, 0, nativeW, nativeH);
+
+  // Binarize: white pixels (painted area) -> 255, everything else -> 0
+  // Fix: use source-over composite so transparent pixels from maskCanvas don't bleed through
+  for (let i = 0; i < imgData.data.length; i += 4) {
+    const alpha = imgData.data[i + 3];
+    const v = alpha > 127 ? 255 : 0;  // threshold at 127 to handle anti-aliasing
+    imgData.data[i]     = v;  // R
+    imgData.data[i + 1] = v;  // G
+    imgData.data[i + 2] = v;  // B
+    imgData.data[i + 3] = 255; // A (fully opaque)
+  }
+  octx.putImageData(imgData, 0, 0);
+
+  let whiteAfter = 0;
+  const check = octx.getImageData(0, 0, nativeW, nativeH);
+  for (let i = 0; i < check.data.length; i += 4) {
+    if (check.data[i] === 255) whiteAfter++;
+  }
+  console.log(`[DEBUG SAVE] native=${nativeW}x${nativeH}, white_after_binarize=${whiteAfter}`);
+
+  const dataUrl = out.toDataURL('image/png');
+  console.log(`[DEBUG SAVE] dataUrl length=${dataUrl.length}`);
+
+  const res = await fetch('/api/mask', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: current.path, image_data: dataUrl }),
+  });
+  const body = await res.json();
+  console.log(`[DEBUG SAVE] server response:`, body);
+  if (res.ok) {
+    setStatus('Saved -> ' + body.saved_to);
+    const v = videos.find(v => v.path === current.path);
+    if (v) v.has_mask = true;
+    renderVideoList();
+    await loadMaskForCurrentVideo();
+  } else {
+    setStatus('Error: ' + (body.error || res.status));
+  }
+};
+
+document.getElementById('toggleMaskBtn').onclick = () => {
+  maskVisible = !maskVisible;
+  maskCanvas.style.opacity = maskVisible ? '0.30' : '0';
+  document.getElementById('toggleMaskBtn').textContent = maskVisible ? 'Hide mask' : 'Show mask';
+};
+
+loadVideos();
+</script>
+</body>
+</html>
