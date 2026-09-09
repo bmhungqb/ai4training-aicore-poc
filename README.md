@@ -207,6 +207,39 @@ Place these under `data/`:
 The bundled `data/expert.json` already has scene boundaries/operations filled in, so it runs straight
 through.
 
+### 2.1 Downloading & Updating Video Dataset (Tải & cập nhật dữ liệu video)
+
+The project organizes videos by operation sequence under `data/{công_đoạn_id}/` (e.g. `data/1/`, `data/2/`, ...).
+Source mapping is maintained in the shared Google Sheet ([cong_doan_sp1.xlsx](https://docs.google.com/spreadsheets/d/1BDx6UMDxh9Z0mT-r3l2go01t3w5CLoTg/edit)), which links each operation to a video filename in the shared Google Drive folder (`157NMvEcMDU5bHiPGAPuvR6lQfzN5k_Mq`).
+
+Use `tools.download_videos` to download new videos and keep local metadata synchronized:
+
+```bash
+# 1. Preview changes (Dry-run) for Chuyền 2:
+python -m tools.download_videos --chuyen 2 --dry-run
+
+# 2. Download all new/missing videos for Chuyền 2:
+python -m tools.download_videos --chuyen 2
+
+# 3. Download for multiple chuyền (e.g. Chuyền 1 and Chuyền 2):
+python -m tools.download_videos --chuyen 1 2
+
+# 4. Download from all tabs (Chuyền 1, Chuyền 2, Chuyền 3):
+python -m tools.download_videos
+
+# 5. Force re-download even if target video already exists locally:
+python -m tools.download_videos --chuyen 2 --force
+
+# 6. Force re-scanning Google Drive folder index (refresh cache):
+python -m tools.download_videos --refresh-drive-cache
+```
+
+**Local sheet metadata cache:**
+Whenever `tools.download_videos` runs, it automatically fetches the latest sheet rows and updates:
+- `data/sheets/Chuyền_1.csv`, `data/sheets/Chuyền_2.csv`, `data/sheets/Chuyền_3.csv`
+- `data/sheets/cong_doan_all.json`
+To sync sheet metadata without downloading videos, use `--dry-run`.
+
 ### Optional: mask out other people in frame
 
 If `worker.mp4` or `expert.mp4` also shows another worker/expert (e.g. two stations sharing one
