@@ -7,6 +7,7 @@ __pycache__/
 # archive and sheets
 *.zip
 *.xlsx
+!evaluation_result_9cd.xlsx
 
 # data and outputs
 data/
