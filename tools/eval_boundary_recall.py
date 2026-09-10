@@ -566,7 +566,15 @@ def evaluate_video(gt_file: Path, pred_file: Path, windows: list[float],
     return result
 
 
-def find_eval_pairs(data_dir: Path, target_cd: str | None = None) -> list[tuple[Path, Path]]:
+def find_eval_pairs(data_dir: Path, pred_dir: Path | None = None, target_cd: str | None = None,
+                    exclude_cds: list[str] | None = None) -> list[tuple[Path, Path]]:
+    if pred_dir is None:
+        pred_dir = Path("data_result") if Path("data_result").exists() else data_dir
+
+    if exclude_cds is None:
+        exclude_cds = []
+    exclude_cds_set = {str(c).strip() for c in exclude_cds}
+
     pairs: list[tuple[Path, Path]] = []
     gt_files = sorted(data_dir.glob("*/chuyen1_segment.json"),
                       key=lambda p: (int(p.parent.name) if p.parent.name.isdigit() else 999, p.parent.name))
@@ -575,6 +583,8 @@ def find_eval_pairs(data_dir: Path, target_cd: str | None = None) -> list[tuple[
         cd_folder = gt_f.parent
         cd_name = cd_folder.name
         if target_cd is not None and str(target_cd).strip() != str(cd_name).strip():
+            continue
+        if str(cd_name).strip() in exclude_cds_set:
             continue
 
         try:
@@ -587,15 +597,25 @@ def find_eval_pairs(data_dir: Path, target_cd: str | None = None) -> list[tuple[
             continue
 
         video_stem = Path(video_file).stem
-        pred_f = cd_folder / "kinematic" / video_stem / "action_segments.json"
-        if pred_f.exists():
-            pairs.append((gt_f, pred_f))
-        else:
-            alt_pred = cd_folder / "kinematic" / "action_segments.json"
+        pred_f = pred_dir / cd_name / "kinematic" / video_stem / "action_segments.json"
+        if not pred_f.exists():
+            alt_pred = pred_dir / cd_name / "kinematic" / "action_segments.json"
             if alt_pred.exists():
-                pairs.append((gt_f, alt_pred))
+                pred_f = alt_pred
             else:
-                pairs.append((gt_f, pred_f))
+                glob_matches = list(pred_dir.glob(f"*/kinematic/{video_stem}/action_segments.json"))
+                if glob_matches:
+                    pred_f = glob_matches[0]
+                else:
+                    fb_pred = cd_folder / "kinematic" / video_stem / "action_segments.json"
+                    if fb_pred.exists():
+                        pred_f = fb_pred
+                    else:
+                        alt_fb = cd_folder / "kinematic" / "action_segments.json"
+                        if alt_fb.exists():
+                            pred_f = alt_fb
+
+        pairs.append((gt_f, pred_f))
 
     return pairs
 
@@ -656,13 +676,18 @@ def main() -> None:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--data-dir", default="data", help="Root data folder (default: data)")
+    parser.add_argument("--data-dir", "--gt-dir", dest="data_dir", default="data",
+                        help="Root data folder containing chuyen1_segment.json (default: data)")
+    parser.add_argument("--pred-dir", default=None,
+                        help="Root folder containing stage 1 kinematic action_segments.json (default: data_result if exists, else data-dir)")
     parser.add_argument("--window", "-w", type=float, default=None,
                         help="Single evaluation window tolerance in seconds (default: 0.5s)")
     parser.add_argument("--windows", nargs="+", type=float, default=None,
                         help="List of window tolerances to sweep (default: 0.25 0.5 0.75 1.0 1.5 2.0)")
     parser.add_argument("--cd", "--cong-doan", dest="cong_doan", default=None,
                         help="Filter to a specific operation ID (e.g. 1)")
+    parser.add_argument("--exclude-cd", nargs="+", default=[],
+                        help="List of operation IDs to exclude (e.g. --exclude-cd 11)")
     parser.add_argument("--exclude-endpoints", action="store_true",
                         help="Exclude the very first (0.0s) and last video boundaries")
     parser.add_argument("--details", action="store_true",
@@ -694,7 +719,9 @@ def main() -> None:
     if not data_dir.exists():
         raise SystemExit(f"Data directory not found: {data_dir}")
 
-    pairs = find_eval_pairs(data_dir, target_cd=args.cong_doan)
+    pred_dir = Path(args.pred_dir) if args.pred_dir else (Path("data_result") if Path("data_result").exists() else data_dir)
+
+    pairs = find_eval_pairs(data_dir, pred_dir=pred_dir, target_cd=args.cong_doan, exclude_cds=args.exclude_cd)
     if not pairs:
         raise SystemExit(f"No chuyen1_segment.json files found under {data_dir}")
 
@@ -872,10 +899,44 @@ def main() -> None:
         print(f"     • Thao tác khớp ÍT NHẤT 1 ĐẦU  : {tuned_step_either_pct:6.2f}% ({tuned_step_either}/{total_steps} thao tác)")
 
     # =========================================================================
-    # BẢNG 3: TOLERANCE WINDOW SWEEP (CẢ RECALL & PRECISION)
+    # BẢNG 3: TOLERANCE WINDOW SWEEP (BASELINE - STAGE 1)
     # =========================================================================
+    print(f"\n[PHẦN 3] TIẾN TRÌNH RECALL & PRECISION THEO DẢI WINDOW (BASELINE - STAGE 1):")
+    print("-" * 125)
+    print(f"{'Window':<8} | {'Recall (Macro / Micro)':<25} | {'Precision (Macro / Micro)':<27} | {'F1-Score':<9} | {'Khớp 2 Đầu':<12} | {'Visual Recall Bar'}")
+    print("-" * 125)
+
+    for w in windows:
+        m_rec = sum(r.get_boundary_recall(w) for r in eval_results) / len(eval_results)
+        w_hits = sum(r.get_boundary_hits(w) for r in eval_results)
+        u_rec = (w_hits / total_gt * 100.0) if total_gt > 0 else 0.0
+
+        m_prec = sum(r.get_boundary_precision(w) for r in eval_results) / len(eval_results)
+        w_pred_hits = sum(
+            sum(1 for p in r.pred_boundaries if any(abs(p - g) <= w for g in r.gt_boundaries))
+            for r in eval_results
+        )
+        u_prec = (w_pred_hits / total_pred_b * 100.0) if total_pred_b > 0 else 0.0
+
+        f1 = (2 * m_prec * m_rec / (m_prec + m_rec)) if (m_prec + m_rec) > 0 else 0.0
+
+        w_both = sum(r.get_step_both_hits(w) for r in eval_results)
+        u_both = (w_both / total_steps * 100.0) if total_steps > 0 else 0.0
+
+        bar = make_ascii_bar(m_rec, width=16)
+        marker = " (*)" if w == primary_window else ""
+
+        col_b = f"{m_rec:5.1f}% / {u_rec:5.1f}% ({w_hits:2d}/{total_gt:2d})"
+        col_p = f"{m_prec:5.1f}% / {u_prec:5.1f}% ({w_pred_hits:2d}/{total_pred_b:2d})"
+        col_both = f"{u_both:5.1f}% ({w_both:2d}/{total_steps:2d})"
+
+        print(f"±{w:<5.2f}s | {col_b:<25} | {col_p:<27} | {f1:5.1f}%   | {col_both:<12} | {bar}{marker}")
+
+    print("-" * 125)
+    print(" (*) Cửa sổ chuẩn mặc định")
+
     if has_tuning:
-        print(f"\n[PHẦN 3] TIẾN TRÌNH RECALL & PRECISION THEO DẢI WINDOW CỦA OPTION TỐI ƯU:")
+        print(f"\n[PHẦN 4] TIẾN TRÌNH RECALL & PRECISION THEO DẢI WINDOW CỦA OPTION TỐI ƯU:")
         print("-" * 125)
         print(f"{'Window':<8} | {'Recall (Macro / Micro)':<25} | {'Precision (Macro / Micro)':<27} | {'F1-Score':<9} | {'Khớp 2 Đầu':<12} | {'Visual Recall Bar'}")
         print("-" * 125)
@@ -906,7 +967,7 @@ def main() -> None:
 
             print(f"±{w:<5.2f}s | {col_b:<25} | {col_p:<27} | {f1:5.1f}%   | {col_both:<12} | {bar}{marker}")
 
-        print("-" * 115)
+        print("-" * 125)
         print(" (*) Cửa sổ chuẩn mặc định")
 
     if skipped:
