@@ -30,7 +30,15 @@ def build_excel_report(out_path: str = "evaluation_result_9cd.xlsx"):
         pred_segs = pred_data.get("segments", [])
         
         gt_bounds = sorted(list({round(float(s[k]), 3) for s in gt_segs for k in ["timestamp_start", "timestamp_end"]}))
-        pred_bounds = sorted(list({round(float(s[k]), 3) for s in pred_segs for k in ["start_time_s", "end_time_s"]}))
+        
+        pred_bounds = []
+        if pred_segs:
+            pred_bounds.append(round(float(pred_segs[0]["start_time_s"]), 3))
+            for i in range(1, len(pred_segs)):
+                t_trans = (float(pred_segs[i-1]["end_time_s"]) + float(pred_segs[i]["start_time_s"])) / 2.0
+                pred_bounds.append(round(t_trans, 3))
+            pred_bounds.append(round(float(pred_segs[-1]["end_time_s"]), 3))
+        pred_bounds = sorted(list(set(pred_bounds)))
         
         # Boundary level hits at 0.5s
         gt_hits = sum(1 for g in gt_bounds if any(abs(g - p) <= primary_tau for p in pred_bounds))

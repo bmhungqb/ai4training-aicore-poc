@@ -309,21 +309,21 @@ def extract_gt_data(gt_file: Path, exclude_endpoints: bool = False) -> tuple[lis
 
 
 def extract_pred_boundaries(pred_file: Path, exclude_endpoints: bool = False) -> tuple[list[float], float]:
-    """Load predicted boundaries and fps from action_segments.json."""
+    """Load predicted transition boundaries and fps from action_segments.json."""
     data = json.loads(pred_file.read_text(encoding="utf-8"))
     fps = float(data.get("fps", 25.0))
     segments = data.get("segments", [])
     if not segments:
         return [], fps
 
-    raw_boundaries: set[float] = set()
-    for s in segments:
-        t0 = round(float(s.get("start_time_s", 0.0)), 3)
-        t1 = round(float(s.get("end_time_s", 0.0)), 3)
-        raw_boundaries.add(t0)
-        raw_boundaries.add(t1)
+    transition_boundaries = [round(float(segments[0].get("start_time_s", 0.0)), 3)]
+    for i in range(1, len(segments)):
+        prev_end = float(segments[i - 1].get("end_time_s", 0.0))
+        curr_start = float(segments[i].get("start_time_s", 0.0))
+        transition_boundaries.append(round((prev_end + curr_start) / 2.0, 3))
+    transition_boundaries.append(round(float(segments[-1].get("end_time_s", 0.0)), 3))
 
-    sorted_bounds = sorted(list(raw_boundaries))
+    sorted_bounds = sorted(list(set(transition_boundaries)))
     if exclude_endpoints and len(sorted_bounds) > 2:
         sorted_bounds = sorted_bounds[1:-1]
 
