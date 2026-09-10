@@ -40,34 +40,36 @@ Trong file `action_segments.json`:
 1. **Khớp ranh giới (Boundary Match)**:
    Mốc Ground Truth $t_{gt}$ được tính là **ĐẠT (Hit)** nếu tồn tại ranh giới chuyển tiếp $p$ của máy sao cho $|t_{gt} - p| \le \tau$ (chuẩn mặc định $\tau = \pm 0.5\text{s}$).
 
-2. **Macro vs Micro**:
-   - **Macro (Trung bình giữa các công đoạn)**:
-     $$\text{Macro Recall} = \frac{1}{N} \sum_{i=1}^{N} \text{Recall}_i, \quad \text{Macro Precision} = \frac{1}{N} \sum_{i=1}^{N} \text{Precision}_i$$
-     *Ý nghĩa*: Đánh giá mức độ đồng đều và tin cậy của mô hình trên mọi loại công đoạn (mỗi công đoạn trọng số bình đẳng $1/9$).
-   - **Micro (Tổng hợp toàn thể)**:
-     $$\text{Micro Recall} = \frac{\sum H_i^{GT}}{\sum G_i} = \frac{317}{363} \approx \mathbf{87.33\%}$$
-     $$\text{Micro Precision} = \frac{\sum H_i^{\text{Pred}}}{\sum P_i} = \frac{421}{1514} \approx \mathbf{27.81\%}$$
-     *Ý nghĩa*: Đánh giá hiệu suất trên toàn bộ khối lượng dữ liệu thực tế.
+2. **Độ bao phủ mốc thao tác (Macro vs Micro Recall)**:
+   Mỗi video $i$ có $G_i$ mốc GT ($H_i^{GT}$ mốc trúng bởi ít nhất một ranh giới máy):
 
-3. **Khớp thao tác nghiệp vụ (Step-level Alignment)**:
-   - **Khớp CẢ 2 ĐẦU (Both Start & End)**: Bước thao tác $[T_{\text{start}}, T_{\text{end}}]$ có cả điểm bắt đầu và điểm kết thúc đều khớp vết cắt máy trong khoảng $\pm \tau$. Đây là điều kiện tiên quyết để phân tách trọn vẹn 1 thao tác.
-   - **Khớp ÍT NHẤT 1 ĐẦU**: Bắt trúng ít nhất Start hoặc End.
+- **Macro Recall (Trung bình giữa các công đoạn)**:
+  $$\text{Macro Recall} = \frac{1}{N} \sum_{i=1}^{N} \frac{H_i^{GT}}{G_i} \times 100\% = \mathbf{86.20\%}$$
+  *Ý nghĩa*: Đánh giá mức độ đồng đều và tin cậy của mô hình trên mọi loại công đoạn (mỗi công đoạn trọng số bình đẳng $1/9$).
+
+- **Micro Recall (Tổng hợp toàn thể)**:
+  $$\text{Micro Recall} = \frac{\sum H_i^{GT}}{\sum G_i} = \frac{317}{363} \approx \mathbf{87.33\%}$$
+  *Ý nghĩa*: Đánh giá hiệu suất trên toàn bộ khối lượng dữ liệu thực tế (bắt trúng 317 / 363 mốc GT).
+
+- **Khớp thao tác nghiệp vụ (Step-level Alignment)**:
+  - **Khớp CẢ 2 ĐẦU (Both Start & End)**: Bước thao tác $[T_{\text{start}}, T_{\text{end}}]$ có cả điểm bắt đầu và điểm kết thúc đều khớp vết cắt máy trong khoảng $\pm \tau$. Đây là điều kiện tiên quyết để cô lập trọn vẹn 1 thao tác.
+  - **Khớp ÍT NHẤT 1 ĐẦU**: Bắt trúng ít nhất Start hoặc End.
 
 ---
 
 ## 3. Kết quả đánh giá chi tiết 9 công đoạn (Cửa sổ $\pm 0.5$ giây)
 
-| CĐ | Tên công đoạn | Boundary Recall | Boundary Precision | F1-Score | Khớp CẢ 2 đầu (Start & End) | Khớp ÍT NHẤT 1 đầu |
-|:---:|:---|:---:|:---:|:---:|:---:|:---:|
-| **1** | Diễu TP 4 cạnh túi lai x2 | **100.0%** | 49.2% | **66.0%** | **24/24 (100.0%)** | 24/24 (100.0%) |
-| **2** | Khóa lưỡi gà + doup đoạn cơi | **92.1%** | 35.6% | **51.4%** | **31/37 (83.8%)** | 37/37 (100.0%) |
-| **3** | Ráp chèn tay lót | **86.7%** | 44.7% | **59.0%** | **10/14 (71.4%)** | 14/14 (100.0%) |
-| **4** | May đáp túi lai | 75.0% | 33.3% | 46.2% | 5/11 (45.5%) | 11/11 (100.0%) |
-| **5** | Rập lược TP cầu dk | **80.8%** | 20.3% | 32.4% | **17/25 (68.0%)** | 24/25 (96.0%) |
-| **6** | Ráp ngang đô sau | **80.0%** | 26.8% | 40.2% | **15/24 (62.5%)** | 24/24 (100.0%) |
-| **8** | Tra tay lót | **77.3%** | 20.1% | 31.8% | **38/63 (60.3%)** | 61/63 (96.8%) |
-| **9** | Tra cổ chính | **92.7%** | 35.0% | **50.8%** | **35/40 (87.5%)** | 40/40 (100.0%) |
-| **10** | Tra tay chính | **91.3%** | 26.7% | 41.3% | **92/111 (82.9%)** | 110/111 (99.1%) |
+| CĐ | Tên công đoạn | Số bước GT | Số mốc GT | Số ranh giới máy | Tỷ lệ cắt máy/GT | Boundary Recall | Độ lệch MAE (s) | Khớp CẢ 2 đầu (Start & End) | Khớp ÍT NHẤT 1 đầu |
+|:---:|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **1** | Diễu TP 4 cạnh túi lai x2 | 24 | 25 | 65 | 2.7x | **100.0%** | 0.135s | **24/24 (100.0%)** | 24/24 (100.0%) |
+| **2** | Khóa lưỡi gà + doup đoạn cơi | 37 | 38 | 146 | 3.9x | **92.1%** | 0.203s | **31/37 (83.8%)** | 37/37 (100.0%) |
+| **3** | Ráp chèn tay lót | 14 | 15 | 38 | 2.7x | **86.7%** | 0.231s | **10/14 (71.4%)** | 14/14 (100.0%) |
+| **4** | May đáp túi lai | 11 | 12 | 36 | 3.3x | 75.0% | 0.198s | 5/11 (45.5%) | 11/11 (100.0%) |
+| **5** | Rập lược TP cầu dk | 25 | 26 | 143 | 5.7x | **80.8%** | 0.210s | **17/25 (68.0%)** | 24/25 (96.0%) |
+| **6** | Ráp ngang đô sau | 24 | 25 | 97 | 4.0x | **80.0%** | 0.238s | **15/24 (62.5%)** | 24/24 (100.0%) |
+| **8** | Tra tay lót | 63 | 66 | 344 | 5.5x | **77.3%** | 0.233s | **38/63 (60.3%)** | 61/63 (96.8%) |
+| **9** | Tra cổ chính | 40 | 41 | 143 | 3.6x | **92.7%** | 0.192s | **35/40 (87.5%)** | 40/40 (100.0%) |
+| **10** | Tra tay chính | 111 | 115 | 502 | 4.5x | **91.3%** | 0.238s | **92/111 (82.9%)** | 110/111 (99.1%) |
 
 ---
 
@@ -76,26 +78,24 @@ Trong file `action_segments.json`:
 Ở mức dung sai chuẩn $\pm 0.5\text{s}$:
 - **Macro Recall**: **$86.20\%$**
 - **Micro Recall**: **$87.33\%$** *(Bắt trúng 317 / 363 mốc ranh giới Ground Truth)*
-- **Macro Precision**: **$32.41\%$** *(Micro Precision: 27.81%, 421 / 1,514 ranh giới của máy)*
-- **Macro F1-Score**: **$46.56\%$**
 - **Thao tác khớp CẢ 2 ĐẦU (Start & End)**: **$76.50\%$** *(267 / 349 thao tác)*
 - **Thao tác khớp ÍT NHẤT 1 ĐẦU**: **$98.28\%$** *(343 / 349 thao tác)*
-- **Độ sai lệch trung bình (MAE - Mean Absolute Error)**:
-  - Trong phạm vi $\pm 0.5\text{s}$: $\text{MAE} = \mathbf{0.191\text{s}}$ (Trung vị: $0.166\text{s}$, tương đương lệch ~3–5 khung hình).
+- **Độ sai lệch trung bình (MAE)**:
+  - Trong phạm vi $\pm 0.5\text{s}$: $\text{MAE} = \mathbf{0.213\text{s}}$ (Trung vị: $0.198\text{s}$, tương đương lệch ~3–4 khung hình).
   - Trong phạm vi $\pm 1.0\text{s}$: $\text{MAE} = \mathbf{0.233\text{s}}$ (Trung vị: $0.198\text{s}$).
 
 ---
 
 ## 5. Tiến trình theo dải dung sai thời gian (Tolerance Window Sweep)
 
-| Cửa sổ dung sai | Recall (Macro / Micro) | Precision (Macro / Micro) | F1-Score | Khớp CẢ 2 đầu | Biểu đồ trực quan |
-|:---:|:---:|:---:|:---:|:---:|:---|
-| **$\pm 0.25$s** | 50.5% / 52.1% (189/363) | 14.9% / 13.0% (197/1514) | 23.0% | 28.1% (98/349) | `[████████░░░░░░░░]` 50.5% |
-| **$\pm 0.50$s** | **86.2% / 87.3% (317/363)** | **32.4% / 27.8% (421/1514)** | **47.1%** | **76.5% (267/349)** | `[██████████████░░]` 86.2% (*Chuẩn*) |
-| **$\pm 0.75$s** | **95.4% / 95.6% (347/363)** | 43.2% / 37.7% (571/1514) | **59.5%** | **91.4% (319/349)** | `[███████████████░]` 95.4% |
-| **$\pm 1.00$s** | **98.4% / 98.6% (358/363)** | 54.6% / 47.3% (716/1514) | **70.3%** | **97.4% (340/349)** | `[████████████████]` 98.4% |
-| **$\pm 1.50$s** | **100.0% / 100.0% (363/363)** | 69.0% / 60.2% (912/1514) | **81.6%** | **100.0% (349/349)** | `[████████████████]` 100.0% |
-| **$\pm 2.00$s** | **100.0% / 100.0% (363/363)** | 75.5% / 66.7% (1010/1514) | **86.0%** | **100.0% (349/349)** | `[████████████████]` 100.0% |
+| Cửa sổ dung sai | Macro Recall (%) | Micro Recall (%) | Số mốc GT trúng | Khớp CẢ 2 đầu | Khớp ÍT NHẤT 1 đầu | Sai lệch MAE (s) | Biểu đồ trực quan |
+|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---|
+| **$\pm 0.25$s** | 50.5% | 52.1% | 189 / 363 | 28.1% (98/349) | 80.2% (280/349) | 0.126s | `[████████░░░░░░░░]` 50.5% |
+| **$\pm 0.50$s** | **86.2%** | **87.3%** | **317 / 363** | **76.5% (267/349)** | **98.3% (343/349)** | **0.213s** | `[██████████████░░]` 86.2% (*Chuẩn*) |
+| **$\pm 0.75$s** | **95.4%** | **95.6%** | **347 / 363** | **91.4% (319/349)** | **100.0% (349/349)** | **0.255s** | `[███████████████░]` 95.4% |
+| **$\pm 1.00$s** | **98.4%** | **98.6%** | **358 / 363** | **97.4% (340/349)** | **100.0% (349/349)** | **0.278s** | `[████████████████]` 98.4% |
+| **$\pm 1.50$s** | **100.0%** | **100.0%** | **363 / 363** | **100.0% (349/349)** | **100.0% (349/349)** | **0.297s** | `[████████████████]` 100.0% |
+| **$\pm 2.00$s** | **100.0%** | **100.0%** | **363 / 363** | **100.0% (349/349)** | **100.0% (349/349)** | **0.301s** | `[████████████████]` 100.0% |
 
 ---
 
