@@ -212,7 +212,14 @@ def run_step1_segmentation(video_path: Path, output_dir: Path, config: PipelineC
 
     cap.release()
 
+    # Free SAM3 model, processor, and inference session BEFORE saving to reclaim GBs of RAM
+    del inference_session, model, processor
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     # Save
+    print(f"[Step 1] Saving {len(frame_indices)} mask frames → {masks_path}...")
     np.savez_compressed(
         masks_path,
         left_masks=np.array(left_masks,   dtype=object),
@@ -223,11 +230,6 @@ def run_step1_segmentation(video_path: Path, output_dir: Path, config: PipelineC
         fps=np.float32(fps), width=np.int32(width), height=np.int32(height),
     )
     print(f"[Step 1] Saved masks → {masks_path}")
-
-    del inference_session, model, processor
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
 
     return masks_path
 
