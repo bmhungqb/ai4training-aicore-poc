@@ -6,10 +6,11 @@ from src.config.phase2_classify import WORKER_FRAMES_DIR  # noqa: F401  (re-expo
                                                           # the frames the classify step sampled)
 
 # --- model -------------------------------------------------------------------
-MODEL = "qwen/qwen3.7-plus"
+MODEL = "qwen/qwen3.7-flash"
 
 # --- paths -------------------------------------------------------------------
-MICRO_EVAL_PATH = DATA_DIR / "micro_eval.json"  # output
+DEFAULT_CD_DIR = DATA_DIR / "1" if (DATA_DIR / "1").is_dir() else DATA_DIR
+MICRO_EVAL_PATH = DEFAULT_CD_DIR / "micro_eval.json"  # output
 
 # --- tunables ----------------------------------------------------------------
 MAX_EXPERT_FRAMES = 8    # expert reference frames sent per slow segment

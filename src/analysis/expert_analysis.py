@@ -39,7 +39,8 @@ from src.prompts.expert_analysis_prompts import (
     SYSTEM_LEARNING_PHASE, SYSTEM_SYNTHESIS_PHASE, USER_LEARNING_PHASE, USER_SYNTHESIS_PHASE)
 from src.segmentation.kinematic import KinematicSegmenter
 from src.utils.frames import (
-    encode_expert_frame, find_mask_for_video, pick_evenly_spread, pick_sharpest_spread)
+    encode_expert_frame, find_mask_for_video, pick_evenly_spread, pick_sharpest_spread,
+    sample_sharp_points_in_window)
 from src.utils.message_content import labeled_frames, render_template_content
 from src.utils.video import extract_frames_by_index, sample_window_frames_cached
 from src.vlm_client import OpenRouterClient
@@ -101,25 +102,29 @@ def auto_select_frames_from_kinematic(
         indices: set[int] = set()
 
         if owned:
-            for seg in owned:
-                seg_frames = sample_window_frames_cached(
+            # 2N+1 frames per scene: start (0.0) + mid (0.5) per segment,
+            # + boundary (1.0) of the last segment (= scene boundary t1)
+            for i, seg in enumerate(owned):
+                is_last = (i == len(owned) - 1)
+                fractions = [0.0, 0.5] + ([1.0] if is_last else [])
+                sharp_frames = sample_sharp_points_in_window(
                     video_path, seg.start_time_s, seg.end_time_s,
-                    fps=max(2.0, frames_per_segment * sharpness_pool_factor / max(seg.duration_s, 0.1)),
-                    out_dir=scene_dir)
-                paths = [p for _, p in seg_frames]
-                for p in pick_sharpest_spread(paths, frames_per_segment, sharpness_pool_factor):
-                    frame_idx = round(float(Path(p).stem.removeprefix("frame_").removesuffix("s")) * fps)
+                    fractions, scene_dir, sharpness_pool_factor=sharpness_pool_factor)
+                for ts, p in sharp_frames:
+                    frame_idx = round(ts * fps)
                     indices.add(frame_idx)
             print(f"scene {idx:02d}: {len(owned)} action segment(s) -> {len(indices)} frame(s)")
         else:
             # fallback: no kinematic segment landed in this scene's time range
-            candidate_fps = max(2.0, frames_per_segment * sharpness_pool_factor / max(t1 - t0, 0.1))
-            seg_frames = sample_window_frames_cached(video_path, t0, t1, fps=candidate_fps, out_dir=scene_dir)
-            paths = [p for _, p in seg_frames]
-            for p in pick_sharpest_spread(paths, frames_per_segment, sharpness_pool_factor):
-                frame_idx = round(float(Path(p).stem.removeprefix("frame_").removesuffix("s")) * fps)
+            # Split scene into frames_per_segment evenly-spread sharp points
+            n_fallback = frames_per_segment
+            points = [i / (n_fallback - 1) for i in range(n_fallback)]
+            sharp_frames = sample_sharp_points_in_window(
+                video_path, t0, t1, points, scene_dir, sharpness_pool_factor=sharpness_pool_factor)
+            for ts, p in sharp_frames:
+                frame_idx = round(ts * fps)
                 indices.add(frame_idx)
-            print(f"scene {idx:02d}: 0 action segments in range -> fallback uniform sample, "
+            print(f"scene {idx:02d}: 0 action segments in range -> fallback {n_fallback} sharp points, "
                   f"{len(indices)} frame(s)")
 
         scene["selected_frame_indices"] = sorted(indices)
@@ -170,12 +175,21 @@ def build_selection_manifest(expert_json_path: str | Path, frames_dir: str | Pat
 
         op_names = scene["operations"]
         operations = [operations_catalog.get(name, {"name": name}) for name in op_names]
-        selected_frames[idx] = {
+        scene_dict = {
             "operations": operations,
             "timestamp_start": scene["timestamp_start"],
             "timestamp_end": scene["timestamp_end"],
             "frames": [str(p) for p in frame_paths],
         }
+        if out_path.exists():
+            try:
+                old_data = json.loads(out_path.read_text(encoding="utf-8"))
+                existing_gl = old_data.get("scenes", {}).get(str(idx), {}).get("guideline")
+                if existing_gl:
+                    scene_dict["guideline"] = existing_gl
+            except Exception:
+                pass
+        selected_frames[idx] = scene_dict
         print(f"scene {idx:02d}: extracted {len(frame_paths)} frame(s) at indices {indices} "
               f"-> {scene_frames_dir}/, ops={op_names}")
 
@@ -229,7 +243,13 @@ def generate_scene_guidelines(manifest_path: str | Path, vlm_client: OpenRouterC
     task_name = data["task_name"]
     mask = mask_path or data.get("mask_path")
 
+    if not vlm_client.available:
+        raise VlmError("No OpenRouter API key (set OPENROUTER_API_KEY)")
+
     for sid, scene_data in data["scenes"].items():
+        if scene_data.get("guideline") and scene_data["guideline"].get("operation_name"):
+            print(f"scene {sid}: cached -> {scene_data['guideline'].get('operation_name')}")
+            continue
         messages = _build_learning_messages(task_name, scene_data, mask_path=mask)
         try:
             reply = vlm_client.chat_json(messages)
@@ -238,6 +258,7 @@ def generate_scene_guidelines(manifest_path: str | Path, vlm_client: OpenRouterC
             continue
         scene_data["guideline"] = reply
         print(f"scene {sid}: {reply.get('operation_name')}")
+        manifest_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
     manifest_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\nUpdated guideline for {len(data['scenes'])} scenes in {manifest_path}")

@@ -267,14 +267,14 @@ def run_step2_optical_flow(video_path: Path, masks_path: Path,
     print(f"ROI mask: {'applied (' + str(getattr(config, 'mask', None)) + ')' if roi_mask_native is not None else 'none (full frame)'}")
 
     scale = config.resize_scale
-
-    all_flows = []
+    n_pairs = len(frame_indices) - 1
+    flow_arr = None
     t0 = time.time()
 
     prev_frame_idx = -1
     prev_frame_img = None
 
-    for i in range(len(frame_indices) - 1):
+    for i in range(n_pairs):
         fi_a = int(frame_indices[i])
         fi_b = int(frame_indices[i + 1])
 
@@ -296,19 +296,23 @@ def run_step2_optical_flow(video_path: Path, masks_path: Path,
         prev_frame_idx = fi_b
         prev_frame_img = f_b
 
-        if not ret_a or not ret_b:
-            all_flows.append(np.zeros((f_a.shape[0], f_a.shape[1], 2), np.float32)
-                             if ret_a and f_a is not None else np.zeros((1, 1, 2), np.float32))
-            continue
-
         # Resize if needed
-        if scale != 1.0:
-            new_w = int(f_a.shape[1] * scale)
-            new_h = int(f_a.shape[0] * scale)
-            f_a = cv2.resize(f_a, (new_w, new_h))
-            f_b = cv2.resize(f_b, (new_w, new_h))
+        if ret_a and f_a is not None:
+            if scale != 1.0:
+                new_w = int(f_a.shape[1] * scale)
+                new_h = int(f_a.shape[0] * scale)
+                f_a = cv2.resize(f_a, (new_w, new_h))
+            if ret_b and f_b is not None and scale != 1.0:
+                f_b = cv2.resize(f_b, (new_w, new_h))
+            H, W = f_a.shape[:2]
+        else:
+            H, W = int(native_h * scale), int(native_w * scale)
 
-        H, W = f_a.shape[:2]
+        if flow_arr is None:
+            flow_arr = np.zeros((len(frame_indices), H, W, 2), dtype=np.float32)
+
+        if not ret_a or not ret_b:
+            continue
 
         # ROI mask, resized to this pair's working resolution — zero out pixels
         # outside the ROI so another worker/expert in frame can't contribute flow
@@ -342,21 +346,21 @@ def run_step2_optical_flow(video_path: Path, masks_path: Path,
             flow = raft.compute_masked_flow(f_a, f_b, combined_mask)
         except Exception as e:
             print(f"  SEA-RAFT failed on pair {fi_a}→{fi_b}: {e}")
-            flow = np.zeros((f_a.shape[0], f_a.shape[1], 2), np.float32)
+            flow = np.zeros((H, W, 2), np.float32)
 
-        all_flows.append(flow)
+        flow_arr[i] = flow
 
         if (i + 1) % 20 == 0:
             elapsed = time.time() - t0
-            print(f"  Pair {i+1}/{len(frame_indices)-1} | {(i+1)/elapsed:.1f} pairs/s")
+            print(f"  Pair {i+1}/{n_pairs} | {(i+1)/elapsed:.1f} pairs/s")
 
     cap.release()
 
-    # Stack + save
-    # Pad last frame by duplicating last flow
-    if all_flows:
-        all_flows.append(all_flows[-1].copy())
-    flow_arr = np.array(all_flows, dtype=np.float32)  # [N, H, W, 2]
+    if flow_arr is None:
+        flow_arr = np.zeros((len(frame_indices), 1, 1, 2), dtype=np.float32)
+    elif len(frame_indices) > 1:
+        # Pad last frame by duplicating last flow
+        flow_arr[-1] = flow_arr[-2]
 
     np.savez_compressed(flow_path, flow=flow_arr, fps=np.float32(fps))
     print(f"[Step 2] Saved flow → {flow_path}  shape={flow_arr.shape}")

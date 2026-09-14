@@ -67,6 +67,67 @@ def pick_sharpest_spread(items: list, max_n: int, sharpness_pool_factor: int = 3
     return [items[j] for j in sorted(chosen)]
 
 
+def sample_sharp_points_in_window(
+    video_path: Path,
+    t0: float,
+    t1: float,
+    points: list[float],
+    scene_dir: Path,
+    sharpness_pool_factor: int = 3,
+) -> list[tuple[float, Path]]:
+    """For each frac in `points` (each 0.0-1.0 as fraction of [t0, t1]),
+    sample a neighborhood of frames around that point, pick the sharpest one,
+    and write it to disk.
+
+    Returns list of (timestamp_s, frame_path) sorted by timestamp.
+    Caches to disk: reuses existing frame files if present.
+    """
+    import cv2
+
+    out_dir = Path(scene_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cap = cv2.VideoCapture(str(video_path))
+    src_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    duration = t1 - t0
+
+    results: list[tuple[float, Path]] = []
+    for frac in points:
+        t_target = t0 + frac * duration
+        half_frac = 1.0 / sharpness_pool_factor
+        t_lo = max(t0, t_target - half_frac * duration)
+        t_hi = min(t1, t_target + half_frac * duration)
+        cand_step = 1.0 / (5.0 * src_fps)
+
+        t_cands = []
+        t = t_lo
+        while t <= t_hi:
+            t_cands.append(t)
+            t += cand_step
+        if t_cands and t_cands[-1] < t_hi:
+            t_cands.append(t_hi)
+
+        best_path, best_score = None, -1.0
+        for tc in t_cands:
+            out_path = out_dir / f"frame_{tc:07.2f}s.jpg"
+            if not out_path.exists():
+                frame_idx = int(round(tc * src_fps))
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                ok, frame_bgr = cap.read()
+                if not ok:
+                    continue
+                cv2.imwrite(str(out_path), frame_bgr)
+            score = sharpness_score(out_path)
+            if score > best_score:
+                best_score = score
+                best_path = out_path
+        if best_path is not None:
+            ts = round(float(best_path.stem.removeprefix("frame_").removesuffix("s")), 2)
+            results.append((ts, best_path))
+
+    cap.release()
+    return sorted(results, key=lambda x: x[0])
+
+
 import numpy as np
 
 _MASK_CACHE: dict[str, np.ndarray | None] = {}

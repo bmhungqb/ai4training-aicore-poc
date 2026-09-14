@@ -1,0 +1,870 @@
+<!DOCTYPE html>
+<html lang="vi" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Điều Chỉnh Timestamp Video Chuyên Gia (Expert Annotation)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            background-color: #090d16;
+            color: #f1f5f9;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            overflow-x: hidden;
+        }
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: #0f172a;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #334155;
+            border-radius: 3px;
+        }
+        .scene-row.active {
+            background-color: rgba(14, 165, 233, 0.15) !important;
+            border-color: #38bdf8 !important;
+        }
+        .timeline-cursor {
+            pointer-events: none;
+            transition: left 0.05s linear;
+        }
+        input[type=number]::-webkit-inner-spin-button,
+        input[type=number]::-webkit-outer-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+    </style>
+</head>
+<body class="p-3 md:p-5 flex flex-col h-screen max-h-screen">
+
+    <!-- Top Header Bar -->
+    <header class="flex flex-wrap items-center justify-between gap-3 bg-slate-900/90 border border-slate-800 rounded-xl px-4 py-2.5 mb-3 flex-shrink-0 shadow-lg">
+        <div class="flex items-center gap-3">
+            <span class="bg-indigo-600/20 text-indigo-400 text-xs font-bold px-2.5 py-1 rounded border border-indigo-500/30">EXPERT ANNOTATOR</span>
+            <h1 id="taskTitle" class="text-base md:text-lg font-bold text-white truncate max-w-md">CĐ 1 : Diễu TP 4 cạnh túi lai x2</h1>
+            <span id="videoNameBadge" class="hidden md:inline bg-slate-800 text-slate-400 font-mono text-xs px-2 py-0.5 rounded border border-slate-700">cam-03_cut.mp4</span>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2 text-xs">
+            <!-- Continuous chain toggle -->
+            <label class="flex items-center gap-1.5 cursor-pointer bg-slate-950 px-3 py-1.5 rounded-lg border border-slate-800 hover:border-slate-700 select-none">
+                <input type="checkbox" id="continuousChainToggle" checked class="rounded border-slate-700 text-indigo-600 focus:ring-0">
+                <span class="text-slate-300 font-medium">🔗 Khóa nối tiếp (End = Next Start)</span>
+            </label>
+
+            <!-- Auto-Snap Button -->
+            <button onclick="autoSnapAllToKinematics()" title="Tự động căn chỉnh tất cả mốc sang ranh giới Kinematic SEA-RAFT gần nhất" 
+                    class="bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 px-3 py-1.5 rounded-lg border border-amber-500/40 font-semibold transition flex items-center gap-1">
+                ⚡ Căn Khớp Kinematic
+            </button>
+
+            <!-- Reset Button -->
+            <button onclick="resetData()" class="bg-slate-800 hover:bg-slate-700 text-slate-300 px-3 py-1.5 rounded-lg border border-slate-700 transition">
+                🔄 Reset
+            </button>
+
+            <!-- Download JSON -->
+            <button onclick="downloadJson()" class="bg-slate-800 hover:bg-slate-700 text-sky-400 px-3 py-1.5 rounded-lg border border-slate-700 font-semibold transition flex items-center gap-1">
+                📥 Tải JSON
+            </button>
+
+            <!-- Save directly -->
+            <button id="saveBtn" onclick="saveToServer()" class="bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-4 py-1.5 rounded-lg shadow-md transition flex items-center gap-1.5">
+                <span>💾 Lưu expert.json</span>
+            </button>
+
+            <!-- Rerun pipeline -->
+            <button id="rerunBtn" onclick="rerunPipeline()" class="bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-3.5 py-1.5 rounded-lg shadow-md transition flex items-center gap-1">
+                <span>🚀 Chạy Lại Bước 1 & Viz</span>
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Workspace Layout: Video on Left, Scenes List on Right -->
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-3 flex-1 min-h-0 overflow-hidden">
+        
+        <!-- Left: Video Player & Controls (col 7) -->
+        <div class="lg:col-span-7 flex flex-col bg-slate-900/90 border border-slate-800 rounded-xl p-3.5 shadow-xl overflow-hidden min-h-0">
+            <!-- Video Canvas / Container -->
+            <div class="relative bg-black rounded-lg overflow-hidden flex items-center justify-center flex-1 min-h-0 aspect-video max-h-[58vh]">
+                <video id="videoPlayer" class="w-full h-full object-contain" preload="auto" playsinline>
+                    <source id="videoSource" src="/video" type="video/mp4">
+                    Trình duyệt không hỗ trợ HTML5 video.
+                </video>
+
+                <!-- Active Scene Overlay Badge on Video -->
+                <div class="absolute top-2 left-2 bg-black/75 backdrop-blur px-3 py-1 rounded-md border border-slate-700 text-xs flex items-center gap-2">
+                    <span id="overlaySceneBadge" class="text-sky-400 font-bold">SCENE #00</span>
+                    <span id="overlaySceneName" class="text-slate-200 truncate max-w-[220px]">Chờ tải...</span>
+                </div>
+
+                <!-- Playhead Time HUD on Video -->
+                <div class="absolute top-2 right-2 bg-black/75 backdrop-blur font-mono px-3 py-1 rounded-md border border-slate-700 text-xs flex items-center gap-2">
+                    <span id="hudCurrentTime" class="text-emerald-400 font-bold text-sm">00:00.00</span>
+                    <span class="text-slate-500">/</span>
+                    <span id="hudDuration" class="text-slate-400">00:00.00</span>
+                    <span id="hudFrameIdx" class="text-amber-400 border-l border-slate-700 pl-2">F#0</span>
+                </div>
+
+                <!-- Loop Scene Indicator -->
+                <div id="loopIndicator" class="hidden absolute bottom-2 right-2 bg-rose-600/90 text-white text-[11px] font-bold px-2 py-0.5 rounded shadow flex items-center gap-1">
+                    🔁 Đang lặp cảnh
+                </div>
+            </div>
+
+            <!-- Video Player Controls -->
+            <div class="mt-3 space-y-2 flex-shrink-0">
+                <!-- Seek Bar -->
+                <div class="flex items-center gap-2">
+                    <input type="range" id="videoSeeker" min="0" max="100" step="0.01" value="0" 
+                           class="flex-1 h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-sky-500">
+                </div>
+
+                <!-- Main Control Buttons Row -->
+                <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <!-- Playback transport -->
+                    <div class="flex items-center gap-1.5">
+                        <button onclick="seekRel(-1.0)" title="Lùi 1s (Shift+Left)" class="bg-slate-800 hover:bg-slate-700 px-2 py-1 rounded border border-slate-700 font-mono">-1s</button>
+                        <button onclick="stepFrame(-1)" title="Lùi 1 frame (, hoặc Left)" class="bg-slate-800 hover:bg-slate-700 px-2.5 py-1 rounded border border-slate-700 font-bold font-mono">◀ 1f</button>
+                        <button id="playBtn" onclick="togglePlay()" class="bg-sky-600 hover:bg-sky-500 text-white font-bold px-4 py-1 rounded shadow min-w-[70px]">
+                            ▶ Play
+                        </button>
+                        <button onclick="stepFrame(1)" title="Tiến 1 frame (. hoặc Right)" class="bg-slate-800 hover:bg-slate-700 px-2.5 py-1 rounded border border-slate-700 font-bold font-mono">1f ▶</button>
+                        <button onclick="seekRel(1.0)" title="Tiến 1s (Shift+Right)" class="bg-slate-800 hover:bg-slate-700 px-2 py-1 rounded border border-slate-700 font-mono">+1s</button>
+
+                        <!-- Speed selector -->
+                        <div class="flex items-center gap-1 ml-2 bg-slate-950 px-1.5 py-0.5 rounded border border-slate-800">
+                            <span class="text-slate-500 text-[11px]">Tốc độ:</span>
+                            <button onclick="setSpeed(0.25)" class="speed-btn px-1.5 py-0.5 rounded hover:text-white" data-speed="0.25">0.25x</button>
+                            <button onclick="setSpeed(0.5)" class="speed-btn px-1.5 py-0.5 rounded hover:text-white" data-speed="0.5">0.5x</button>
+                            <button onclick="setSpeed(1.0)" class="speed-btn px-1.5 py-0.5 rounded font-bold text-sky-400" data-speed="1.0">1x</button>
+                            <button onclick="setSpeed(1.5)" class="speed-btn px-1.5 py-0.5 rounded hover:text-white" data-speed="1.5">1.5x</button>
+                        </div>
+                    </div>
+
+                    <!-- Loop Scene toggle -->
+                    <button id="loopSceneBtn" onclick="toggleLoopScene()" class="bg-slate-800 hover:bg-slate-700 text-slate-300 px-2.5 py-1 rounded border border-slate-700 transition flex items-center gap-1">
+                        🔁 Lặp Cảnh
+                    </button>
+                </div>
+
+                <!-- Quick Boundary Set Buttons for Active Scene -->
+                <div class="bg-slate-950/80 p-2.5 rounded-lg border border-slate-800 flex flex-wrap items-center justify-between gap-2">
+                    <div class="flex items-center gap-2 text-xs">
+                        <span class="text-slate-400 font-semibold">Cảnh đang chọn:</span>
+                        <span id="quickSceneName" class="text-white font-bold">#00: Lấy túi lai...</span>
+                    </div>
+
+                    <div class="flex items-center gap-1.5 text-xs">
+                        <button onclick="setStartToCurrent()" title="Phím tắt: [" class="bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/40 px-2.5 py-1 rounded font-semibold transition">
+                            📍 Gán Start = Playhead [
+                        </button>
+                        <button onclick="setEndToCurrent()" title="Phím tắt: ]" class="bg-rose-600/20 hover:bg-rose-600/30 text-rose-400 border border-rose-500/40 px-2.5 py-1 rounded font-semibold transition">
+                            📍 Gán End = Playhead ]
+                        </button>
+                        <button onclick="snapActiveStartKinematic()" title="Hút start về mốc Kinematic SEA-RAFT gần nhất" class="bg-sky-600/20 hover:bg-sky-600/30 text-sky-400 border border-sky-500/40 px-2 py-1 rounded transition">
+                            🧲 Hút Start
+                        </button>
+                        <button onclick="snapActiveEndKinematic()" title="Hút end về mốc Kinematic SEA-RAFT gần nhất" class="bg-sky-600/20 hover:bg-sky-600/30 text-sky-400 border border-sky-500/40 px-2 py-1 rounded transition">
+                            🧲 Hút End
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right: Scenes List & Timestamp Inputs (col 5) -->
+        <div class="lg:col-span-5 flex flex-col bg-slate-900/90 border border-slate-800 rounded-xl p-3.5 shadow-xl overflow-hidden min-h-0">
+            <!-- Filter & Stats -->
+            <div class="flex items-center justify-between gap-2 pb-2.5 border-b border-slate-800 flex-shrink-0">
+                <div class="flex items-center gap-2">
+                    <h2 class="text-sm font-bold text-white">Danh Mục Cảnh Thao Tác (SOP)</h2>
+                    <span id="scenesCountBadge" class="bg-slate-800 text-slate-400 text-xs px-2 py-0.5 rounded font-mono">24 cảnh</span>
+                </div>
+                <input type="text" id="sceneSearchInput" placeholder="Lọc thao tác..." 
+                       class="bg-slate-950 border border-slate-700 rounded px-2.5 py-1 text-xs text-slate-200 focus:outline-none focus:border-sky-500 w-36">
+            </div>
+
+            <!-- Scrollable Scenes Table -->
+            <div id="scenesList" class="flex-1 overflow-y-auto space-y-2 mt-2.5 pr-1 custom-scrollbar">
+                <!-- Dynamically populated scene cards -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Bottom: Interactive Multi-Track Visual Timeline -->
+    <div class="mt-3 bg-slate-900/90 border border-slate-800 rounded-xl p-3 shadow-xl flex-shrink-0 space-y-1.5">
+        <div class="flex items-center justify-between text-xs text-slate-400 px-1">
+            <div class="flex items-center gap-4">
+                <span class="font-bold text-slate-300">📊 MULTI-TRACK TIMELINE</span>
+                <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bg-purple-500/80"></span> Kinematic (SEA-RAFT Flow)</span>
+                <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bg-sky-500/80"></span> Cảnh Chuẩn (SOP Scenes)</span>
+                <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bg-amber-500/80"></span> Sheet Thủ Công (GT)</span>
+            </div>
+            <div class="text-[11px] font-mono text-slate-400">
+                Nhấp chuột trên timeline để nhảy video • Nhấp mốc Kinematic để căn Start/End
+            </div>
+        </div>
+
+        <!-- Timeline Canvas Container -->
+        <div id="timelineContainer" class="relative bg-slate-950 rounded-lg border border-slate-800 select-none overflow-hidden cursor-pointer" style="height: 105px;">
+            <!-- Track 1: Kinematic action segments (0px - 32px) -->
+            <div id="trackKinematic" class="absolute left-0 right-0 top-0 h-8 border-b border-slate-800/80 overflow-hidden"></div>
+
+            <!-- Track 2: SOP Scenes (32px - 68px) -->
+            <div id="trackScenes" class="absolute left-0 right-0 top-8 h-9 border-b border-slate-800/80 overflow-hidden"></div>
+
+            <!-- Track 3: Manual Sheet GT (68px - 90px) -->
+            <div id="trackManual" class="absolute left-0 right-0 top-[68px] h-6 border-b border-slate-800/80 overflow-hidden"></div>
+
+            <!-- Time Ruler Axis (90px - 105px) -->
+            <div id="trackRuler" class="absolute left-0 right-0 bottom-0 h-4 bg-slate-900/60 font-mono text-[9px] text-slate-500 overflow-hidden"></div>
+
+            <!-- Red Playhead Cursor Line -->
+            <div id="playheadCursor" class="timeline-cursor absolute top-0 bottom-0 w-[2px] bg-red-500 z-30 shadow-[0_0_8px_rgba(239,68,68,0.8)]" style="left: 0%;">
+                <div class="w-2 h-2 bg-red-500 rotate-45 -ml-[3px] -mt-1"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Notification Toast Modal -->
+    <div id="toast" class="fixed bottom-6 right-6 z-50 transform transition-all duration-300 translate-y-20 opacity-0 pointer-events-none bg-slate-900 text-white border border-slate-700 px-4 py-3 rounded-xl shadow-2xl flex items-center gap-3">
+        <span id="toastIcon" class="text-xl">✅</span>
+        <div>
+            <div id="toastTitle" class="font-bold text-sm">Thành công</div>
+            <div id="toastMsg" class="text-xs text-slate-300">Nội dung thông báo</div>
+        </div>
+    </div>
+
+    <script>
+        // State
+        let appData = null;
+        let scenes = [];
+        let originalScenes = [];
+        let kinematicSegments = [];
+        let manualSegments = [];
+        let activeSceneIdx = 0;
+        let videoDuration = 57.02;
+        let fps = 15.046;
+        let isLoopingScene = false;
+
+        const video = document.getElementById('videoPlayer');
+        const seeker = document.getElementById('videoSeeker');
+        const playBtn = document.getElementById('playBtn');
+
+        // Color palette for scenes & kinematics
+        const COLORS = [
+            "#38bdf8", "#818cf8", "#c084fc", "#f472b6", "#fb7185",
+            "#34d399", "#2dd4bf", "#22d3ee", "#a78bfa", "#f59e0b",
+            "#10b981", "#06b6d4", "#6366f1", "#d946ef", "#f43f5e"
+        ];
+
+        function getSceneColor(idx) {
+            return COLORS[idx % COLORS.length];
+        }
+
+        // Initialize and fetch data
+        async function init() {
+            try {
+                const res = await fetch('/api/data');
+                appData = await res.json();
+                loadData(appData);
+            } catch (err) {
+                console.warn("Could not load from /api/data, using embedded fallback:", err);
+                if (window.EMBEDDED_DATA) {
+                    loadData(window.EMBEDDED_DATA);
+                } else {
+                    showToast("Lỗi nạp dữ liệu", "Không thể kết nối API máy chủ.", "❌");
+                }
+            }
+        }
+
+        function loadData(data) {
+            const expVideo = data.expert_data?.expert_video?.[0] || {};
+            scenes = JSON.parse(JSON.stringify(expVideo.scenes || []));
+            originalScenes = JSON.parse(JSON.stringify(scenes));
+
+            kinematicSegments = data.kinematic_data?.segments || [];
+            manualSegments = data.chuyen1_data?.segments || [];
+            fps = data.kinematic_data?.fps || 15.046;
+
+            if (data.expert_data?.task_name) {
+                document.getElementById('taskTitle').innerText = data.expert_data.task_name;
+            }
+            if (data.video_name) {
+                document.getElementById('videoNameBadge').innerText = data.video_name;
+            }
+
+            // Estimate total duration
+            videoDuration = expVideo.duration || (kinematicSegments.length > 0 ? kinematicSegments[kinematicSegments.length - 1].end_time_s : 57.02);
+            seeker.max = videoDuration;
+
+            renderScenesList();
+            renderTimeline();
+            selectScene(0);
+        }
+
+        // Video Player events
+        video.addEventListener('loadedmetadata', () => {
+            if (video.duration && !isNaN(video.duration)) {
+                videoDuration = video.duration;
+                seeker.max = videoDuration;
+            }
+            document.getElementById('hudDuration').innerText = formatTime(videoDuration);
+            renderTimeline();
+        });
+
+        video.addEventListener('timeupdate', () => {
+            const cur = video.currentTime;
+            seeker.value = cur;
+            document.getElementById('hudCurrentTime').innerText = formatTime(cur);
+            document.getElementById('hudFrameIdx').innerText = `F#${Math.round(cur * fps)}`;
+
+            // Update playhead on timeline
+            const pct = Math.min(100, Math.max(0, (cur / videoDuration) * 100));
+            document.getElementById('playheadCursor').style.left = `${pct}%`;
+
+            // Auto-detect active scene based on current time if not looping
+            if (!isLoopingScene) {
+                for (let i = 0; i < scenes.length; i++) {
+                    if (cur >= scenes[i].timestamp_start && cur < scenes[i].timestamp_end) {
+                        if (activeSceneIdx !== i) {
+                            setActiveSceneSilent(i);
+                        }
+                        break;
+                    }
+                }
+            } else {
+                // Loop handling
+                const s = scenes[activeSceneIdx];
+                if (s && (cur >= s.timestamp_end || cur < s.timestamp_start - 0.2)) {
+                    video.currentTime = s.timestamp_start;
+                }
+            }
+        });
+
+        video.addEventListener('play', () => playBtn.innerText = '⏸ Pause');
+        video.addEventListener('pause', () => playBtn.innerText = '▶ Play');
+
+        seeker.addEventListener('input', (e) => {
+            video.currentTime = parseFloat(e.target.value);
+        });
+
+        function togglePlay() {
+            if (video.paused) video.play();
+            else video.pause();
+        }
+
+        function setSpeed(sp) {
+            video.playbackRate = sp;
+            document.querySelectorAll('.speed-btn').forEach(b => {
+                b.classList.remove('font-bold', 'text-sky-400');
+                if (parseFloat(b.dataset.speed) === sp) {
+                    b.classList.add('font-bold', 'text-sky-400');
+                }
+            });
+        }
+
+        function seekRel(delta) {
+            video.currentTime = Math.max(0, Math.min(videoDuration, video.currentTime + delta));
+        }
+
+        function stepFrame(frames) {
+            video.pause();
+            const dt = frames / fps;
+            video.currentTime = Math.max(0, Math.min(videoDuration, video.currentTime + dt));
+        }
+
+        function toggleLoopScene() {
+            isLoopingScene = !isLoopingScene;
+            const btn = document.getElementById('loopSceneBtn');
+            const ind = document.getElementById('loopIndicator');
+            if (isLoopingScene) {
+                btn.className = "bg-rose-600 hover:bg-rose-500 text-white px-2.5 py-1 rounded border border-rose-500 font-bold transition flex items-center gap-1";
+                ind.classList.remove('hidden');
+                const s = scenes[activeSceneIdx];
+                if (s) video.currentTime = s.timestamp_start;
+                video.play();
+            } else {
+                btn.className = "bg-slate-800 hover:bg-slate-700 text-slate-300 px-2.5 py-1 rounded border border-slate-700 transition flex items-center gap-1";
+                ind.classList.add('hidden');
+            }
+        }
+
+        function formatTime(s) {
+            const m = Math.floor(s / 60);
+            const sec = (s % 60).toFixed(2);
+            return `${m < 10 ? '0' : ''}${m}:${sec < 10 ? '0' : ''}${sec}`;
+        }
+
+        // Scene selection & active state
+        function selectScene(idx) {
+            activeSceneIdx = idx;
+            const s = scenes[idx];
+            if (!s) return;
+
+            // Highlight in list
+            document.querySelectorAll('.scene-row').forEach(r => r.classList.remove('active'));
+            const card = document.getElementById(`scene-card-${idx}`);
+            if (card) {
+                card.classList.add('active');
+                card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }
+
+            const op = s.operations?.[0] || `Scene ${idx}`;
+            document.getElementById('overlaySceneBadge').innerText = `SCENE #${idx < 10 ? '0' : ''}${idx}`;
+            document.getElementById('overlaySceneName').innerText = op;
+            document.getElementById('quickSceneName').innerText = `#${idx < 10 ? '0' : ''}${idx}: ${op}`;
+
+            video.currentTime = s.timestamp_start;
+            renderTimelineHighlights();
+        }
+
+        function setActiveSceneSilent(idx) {
+            activeSceneIdx = idx;
+            const s = scenes[idx];
+            if (!s) return;
+            document.querySelectorAll('.scene-row').forEach(r => r.classList.remove('active'));
+            const card = document.getElementById(`scene-card-${idx}`);
+            if (card) card.classList.add('active');
+
+            const op = s.operations?.[0] || `Scene ${idx}`;
+            document.getElementById('overlaySceneBadge').innerText = `SCENE #${idx < 10 ? '0' : ''}${idx}`;
+            document.getElementById('overlaySceneName').innerText = op;
+            document.getElementById('quickSceneName').innerText = `#${idx < 10 ? '0' : ''}${idx}: ${op}`;
+            renderTimelineHighlights();
+        }
+
+        // Render Right Side Scenes Table
+        function renderScenesList() {
+            const container = document.getElementById('scenesList');
+            container.innerHTML = '';
+            document.getElementById('scenesCountBadge').innerText = `${scenes.length} cảnh`;
+
+            scenes.forEach((s, idx) => {
+                const op = s.operations?.[0] || `Scene ${idx}`;
+                const dur = (s.timestamp_end - s.timestamp_start).toFixed(2);
+                const col = getSceneColor(idx);
+
+                // Check continuity gap with previous
+                let warningBadge = '';
+                if (idx > 0) {
+                    const prevEnd = scenes[idx - 1].timestamp_end;
+                    const diff = Math.abs(s.timestamp_start - prevEnd);
+                    if (diff > 0.05) {
+                        warningBadge = `<span class="text-[10px] text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded border border-amber-500/30" title="Chênh ${diff.toFixed(2)}s so với cảnh trước">⚠️ Hở ${diff.toFixed(2)}s</span>`;
+                    }
+                }
+
+                // Kinematics falling inside
+                const ownedKin = kinematicSegments.filter(k => {
+                    const mid = (k.start_time_s + k.end_time_s) / 2;
+                    return mid >= s.timestamp_start && mid < s.timestamp_end;
+                });
+
+                const card = document.createElement('div');
+                card.id = `scene-card-${idx}`;
+                card.className = `scene-row p-2.5 rounded-lg border border-slate-800 bg-slate-950/60 hover:bg-slate-800/40 transition cursor-pointer ${idx === activeSceneIdx ? 'active' : ''}`;
+                card.onclick = () => selectScene(idx);
+
+                card.innerHTML = `
+                    <div class="flex items-center justify-between gap-2 mb-1.5">
+                        <div class="flex items-center gap-2 truncate">
+                            <span class="w-2.5 h-2.5 rounded-full flex-shrink-0" style="background-color: ${col};"></span>
+                            <span class="font-mono text-xs text-sky-400 font-bold">#${idx < 10 ? '0' : ''}${idx}</span>
+                            <span class="text-xs font-semibold text-slate-100 truncate" title="${op}">${op}</span>
+                        </div>
+                        <div class="flex items-center gap-1 flex-shrink-0">
+                            ${warningBadge}
+                            <span class="text-[11px] font-mono text-indigo-300 bg-indigo-500/10 px-1.5 py-0.5 rounded" title="${ownedKin.length} đoạn kinematic thực tế">${ownedKin.length} segs</span>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-12 gap-1.5 items-center text-xs" onclick="event.stopPropagation()">
+                        <div class="col-span-4 flex items-center gap-1">
+                            <span class="text-slate-500 text-[10px] font-mono">Bắt đầu:</span>
+                            <input type="number" step="0.01" min="0" value="${s.timestamp_start.toFixed(2)}" 
+                                   onchange="updateTimestamp(${idx}, 'start', this.value)"
+                                   class="w-full bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-xs text-emerald-400 font-mono focus:border-emerald-500 focus:outline-none">
+                        </div>
+                        <div class="col-span-4 flex items-center gap-1">
+                            <span class="text-slate-500 text-[10px] font-mono">Kết thúc:</span>
+                            <input type="number" step="0.01" min="0" value="${s.timestamp_end.toFixed(2)}" 
+                                   onchange="updateTimestamp(${idx}, 'end', this.value)"
+                                   class="w-full bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-xs text-rose-400 font-mono focus:border-rose-500 focus:outline-none">
+                        </div>
+                        <div class="col-span-2 text-center text-slate-400 font-mono text-[11px]">
+                            ${dur}s
+                        </div>
+                        <div class="col-span-2 flex justify-end gap-1">
+                            <button onclick="playScene(${idx})" title="Phát cảnh này" class="p-1 hover:bg-slate-800 text-sky-400 rounded">▶</button>
+                            <button onclick="snapSceneKinematics(${idx})" title="Hút cả 2 mốc về Kinematic gần nhất" class="p-1 hover:bg-slate-800 text-amber-400 rounded">🧲</button>
+                        </div>
+                    </div>
+                `;
+                container.appendChild(card);
+            });
+        }
+
+        // Update timestamps with continuity chain
+        function updateTimestamp(idx, type, valStr) {
+            const val = Math.max(0, Math.min(videoDuration, parseFloat(valStr) || 0));
+            const isChain = document.getElementById('continuousChainToggle').checked;
+
+            if (type === 'start') {
+                scenes[idx].timestamp_start = val;
+                if (scenes[idx].timestamp_end <= val) {
+                    scenes[idx].timestamp_end = Math.min(videoDuration, val + 0.5);
+                }
+                // Chain to previous end
+                if (isChain && idx > 0) {
+                    scenes[idx - 1].timestamp_end = val;
+                }
+            } else {
+                scenes[idx].timestamp_end = val;
+                if (scenes[idx].timestamp_start >= val) {
+                    scenes[idx].timestamp_start = Math.max(0, val - 0.5);
+                }
+                // Chain to next start
+                if (isChain && idx < scenes.length - 1) {
+                    scenes[idx + 1].timestamp_start = val;
+                }
+            }
+
+            renderScenesList();
+            renderTimeline();
+        }
+
+        function setStartToCurrent() {
+            const t = Math.round(video.currentTime * 100) / 100;
+            updateTimestamp(activeSceneIdx, 'start', t);
+            showToast("Đã gán Start", `Cảnh #${activeSceneIdx} start = ${t.toFixed(2)}s`);
+        }
+
+        function setEndToCurrent() {
+            const t = Math.round(video.currentTime * 100) / 100;
+            updateTimestamp(activeSceneIdx, 'end', t);
+            showToast("Đã gán End", `Cảnh #${activeSceneIdx} end = ${t.toFixed(2)}s`);
+        }
+
+        function playScene(idx) {
+            selectScene(idx);
+            video.currentTime = scenes[idx].timestamp_start;
+            video.play();
+        }
+
+        // Kinematic boundaries snapping
+        function getKinematicBoundaries() {
+            const b = [0.0];
+            kinematicSegments.forEach(k => {
+                b.push(k.start_time_s);
+                b.push(k.end_time_s);
+            });
+            return Array.from(new Set(b)).sort((a, b) => a - b);
+        }
+
+        function findNearestBoundary(t, maxDiff = 1.5) {
+            const bnds = getKinematicBoundaries();
+            let best = t;
+            let minD = Infinity;
+            for (const b of bnds) {
+                const d = Math.abs(b - t);
+                if (d < minD && d <= maxDiff) {
+                    minD = d;
+                    best = b;
+                }
+            }
+            return best;
+        }
+
+        function snapActiveStartKinematic() {
+            const cur = scenes[activeSceneIdx].timestamp_start;
+            const near = findNearestBoundary(cur);
+            updateTimestamp(activeSceneIdx, 'start', near);
+            showToast("Hút Kinematic Start", `Cảnh #${activeSceneIdx} start: ${cur.toFixed(2)}s ➔ ${near.toFixed(2)}s`);
+        }
+
+        function snapActiveEndKinematic() {
+            const cur = scenes[activeSceneIdx].timestamp_end;
+            const near = findNearestBoundary(cur);
+            updateTimestamp(activeSceneIdx, 'end', near);
+            showToast("Hút Kinematic End", `Cảnh #${activeSceneIdx} end: ${cur.toFixed(2)}s ➔ ${near.toFixed(2)}s`);
+        }
+
+        function snapSceneKinematics(idx) {
+            const s = scenes[idx];
+            const nStart = findNearestBoundary(s.timestamp_start);
+            const nEnd = findNearestBoundary(s.timestamp_end);
+            s.timestamp_start = nStart;
+            s.timestamp_end = nEnd;
+            renderScenesList();
+            renderTimeline();
+            showToast("Căn khớp Scene", `Cảnh #${idx} đã hút về mốc Kinematic gần nhất.`);
+        }
+
+        function autoSnapAllToKinematics() {
+            if (!confirm("Bạn có chắc chắn muốn tự động căn chỉnh tất cả 24 cảnh về các mốc Kinematic gần nhất không?")) return;
+            scenes.forEach((s, i) => {
+                s.timestamp_start = findNearestBoundary(s.timestamp_start, 0.8);
+                s.timestamp_end = findNearestBoundary(s.timestamp_end, 0.8);
+                if (i > 0 && document.getElementById('continuousChainToggle').checked) {
+                    s.timestamp_start = scenes[i - 1].timestamp_end;
+                }
+            });
+            renderScenesList();
+            renderTimeline();
+            showToast("Tự động căn khớp", "Đã căn chỉnh toàn bộ các cảnh khớp ranh giới Kinematic!", "⚡");
+        }
+
+        // Render Multi-Track Timeline
+        function renderTimeline() {
+            const trackKin = document.getElementById('trackKinematic');
+            const trackScn = document.getElementById('trackScenes');
+            const trackMan = document.getElementById('trackManual');
+            const trackRul = document.getElementById('trackRuler');
+
+            trackKin.innerHTML = '';
+            trackScn.innerHTML = '';
+            trackMan.innerHTML = '';
+            trackRul.innerHTML = '';
+
+            // 1. Track Kinematic Segments
+            kinematicSegments.forEach((k, i) => {
+                const left = (k.start_time_s / videoDuration) * 100;
+                const width = Math.max(0.2, (k.duration_s / videoDuration) * 100);
+                const bg = i % 2 === 0 ? 'rgba(168, 85, 247, 0.7)' : 'rgba(147, 51, 234, 0.5)';
+
+                const el = document.createElement('div');
+                el.className = 'absolute top-0 bottom-0 border-r border-black/40 hover:brightness-125 cursor-pointer text-[9px] font-mono text-white/90 overflow-hidden flex items-center px-1';
+                el.style.left = `${left}%`;
+                el.style.width = `${width}%`;
+                el.style.backgroundColor = bg;
+                el.title = `[Kinematic #${k.segment_idx}] ${k.start_time_s.toFixed(2)}s – ${k.end_time_s.toFixed(2)}s (${k.duration_s.toFixed(2)}s)`;
+                el.innerText = `${k.segment_idx}`;
+                el.onclick = (e) => {
+                    e.stopPropagation();
+                    video.currentTime = k.start_time_s;
+                };
+                trackKin.appendChild(el);
+            });
+
+            // 2. Track SOP Scenes (Editable)
+            scenes.forEach((s, i) => {
+                const left = (s.timestamp_start / videoDuration) * 100;
+                const width = Math.max(0.3, ((s.timestamp_end - s.timestamp_start) / videoDuration) * 100);
+                const col = getSceneColor(i);
+
+                const el = document.createElement('div');
+                el.id = `timeline-scene-${i}`;
+                el.className = `absolute top-0 bottom-0 border-r border-black/50 hover:brightness-125 cursor-pointer text-[10px] font-bold text-white overflow-hidden flex items-center px-1.5 transition-all ${i === activeSceneIdx ? 'ring-2 ring-white z-10' : ''}`;
+                el.style.left = `${left}%`;
+                el.style.width = `${width}%`;
+                el.style.backgroundColor = col;
+                el.title = `[Scene #${i}] ${s.operations?.[0] || ''} (${s.timestamp_start.toFixed(2)}s – ${s.timestamp_end.toFixed(2)}s)`;
+                el.innerHTML = `<span class="truncate">#${i} ${s.operations?.[0] || ''}</span>`;
+                el.onclick = (e) => {
+                    e.stopPropagation();
+                    selectScene(i);
+                };
+                trackScn.appendChild(el);
+            });
+
+            // 3. Track Manual Sheet GT
+            manualSegments.forEach((m, i) => {
+                const left = (m.timestamp_start / videoDuration) * 100;
+                const width = Math.max(0.2, (m.duration / videoDuration) * 100);
+                const bg = i % 2 === 0 ? 'rgba(245, 158, 11, 0.7)' : 'rgba(217, 119, 6, 0.5)';
+
+                const el = document.createElement('div');
+                el.className = 'absolute top-0 bottom-0 border-r border-black/40 text-[8px] font-mono text-white/90 overflow-hidden flex items-center px-1';
+                el.style.left = `${left}%`;
+                el.style.width = `${width}%`;
+                el.style.backgroundColor = bg;
+                el.title = `[Manual GT #${m.stt}] ${m.name} (${m.timestamp_start.toFixed(1)}s – ${m.timestamp_end.toFixed(1)}s)`;
+                el.innerText = `${m.stt}`;
+                trackMan.appendChild(el);
+            });
+
+            // 4. Ruler Axis (ticks every 5s)
+            for (let t = 0; t <= videoDuration; t += 5) {
+                const left = (t / videoDuration) * 100;
+                const tick = document.createElement('div');
+                tick.className = 'absolute top-0 bottom-0 border-l border-slate-700 pl-0.5';
+                tick.style.left = `${left}%`;
+                tick.innerText = `${t}s`;
+                trackRul.appendChild(tick);
+            }
+        }
+
+        function renderTimelineHighlights() {
+            scenes.forEach((_, i) => {
+                const el = document.getElementById(`timeline-scene-${i}`);
+                if (el) {
+                    if (i === activeSceneIdx) {
+                        el.classList.add('ring-2', 'ring-white', 'z-10');
+                    } else {
+                        el.classList.remove('ring-2', 'ring-white', 'z-10');
+                    }
+                }
+            });
+        }
+
+        // Timeline container click seeking
+        document.getElementById('timelineContainer').addEventListener('click', (e) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            const clickX = e.clientX - rect.left;
+            const pct = Math.max(0, Math.min(1, clickX / rect.width));
+            video.currentTime = pct * videoDuration;
+        });
+
+        // Save to Server
+        async function saveToServer() {
+            const saveBtn = document.getElementById('saveBtn');
+            saveBtn.disabled = true;
+            saveBtn.innerText = '⏳ Đang lưu...';
+
+            const endpoint = (window.location.protocol === 'file:') 
+                ? 'http://localhost:8766/api/save' 
+                : '/api/save';
+
+            try {
+                const res = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ scenes })
+                });
+                const data = await res.json();
+                if (data.ok) {
+                    showToast("Đã lưu expert.json!", `Đã sao lưu tại ${data.backup_file}`, "💾");
+                } else {
+                    showToast("Lỗi khi lưu", data.error, "❌");
+                }
+            } catch (err) {
+                // Fallback: auto download so user NEVER loses their adjustments!
+                downloadJson();
+                showToast("Đã tự động tải JSON", "Không thể gọi API trực tiếp, file expert.json mới đã được tải xuống máy bạn!", "📥");
+            } finally {
+                saveBtn.disabled = false;
+                saveBtn.innerText = '💾 Lưu expert.json';
+            }
+        }
+
+        // Rerun pipeline Step 1 & visualization
+        async function rerunPipeline() {
+            if (!confirm("Bạn có muốn chạy lại Bước 1.1, 1.2 và cập nhật lại ảnh Grid với timestamp mới không?")) return;
+            const btn = document.getElementById('rerunBtn');
+            btn.disabled = true;
+            btn.innerText = '⏳ Đang chạy...';
+
+            const saveEp = (window.location.protocol === 'file:') ? 'http://localhost:8766/api/save' : '/api/save';
+            const rerunEp = (window.location.protocol === 'file:') ? 'http://localhost:8766/api/rerun_step1' : '/api/rerun_step1';
+
+            try {
+                // First save
+                await fetch(saveEp, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ scenes })
+                });
+
+                const res = await fetch(rerunEp, { method: 'POST' });
+                const data = await res.json();
+                if (data.ok) {
+                    showToast("Chạy hoàn tất!", "Đã cập nhật lại selected frames & grid visualization!", "🚀");
+                } else {
+                    showToast("Lỗi thực thi", data.error, "❌");
+                }
+            } catch (err) {
+                showToast("Lỗi máy chủ", err.message, "❌");
+            } finally {
+                btn.disabled = false;
+                btn.innerText = '🚀 Chạy Lại Bước 1 & Viz';
+            }
+        }
+
+        // Download JSON
+        function downloadJson() {
+            const base = appData?.expert_data || window.EMBEDDED_DATA?.expert_data || {};
+            const clone = JSON.parse(JSON.stringify(base));
+            if (clone.expert_video?.[0]) {
+                clone.expert_video[0].scenes = scenes;
+            }
+            const blob = new Blob([JSON.stringify(clone, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'expert.json';
+            a.click();
+            URL.revokeObjectURL(url);
+            showToast("Tải file JSON", "Đã tải xuống expert.json");
+        }
+
+        // Reset
+        function resetData() {
+            if (confirm("Khôi phục lại toàn bộ timestamp ban đầu?")) {
+                scenes = JSON.parse(JSON.stringify(originalScenes));
+                renderScenesList();
+                renderTimeline();
+                showToast("Đã Reset", "Đã khôi phục timestamp ban đầu");
+            }
+        }
+
+        // Toast notification
+        function showToast(title, msg, icon = "✅") {
+            const t = document.getElementById('toast');
+            document.getElementById('toastTitle').innerText = title;
+            document.getElementById('toastMsg').innerText = msg;
+            document.getElementById('toastIcon').innerText = icon;
+
+            t.classList.remove('translate-y-20', 'opacity-0', 'pointer-events-none');
+            setTimeout(() => {
+                t.classList.add('translate-y-20', 'opacity-0', 'pointer-events-none');
+            }, 3500);
+        }
+
+        // Keyboard Shortcuts
+        document.addEventListener('keydown', (e) => {
+            if (['input', 'textarea'].includes(document.activeElement.tagName.toLowerCase())) return;
+
+            if (e.code === 'Space') {
+                e.preventDefault();
+                togglePlay();
+            } else if (e.key === '[') {
+                e.preventDefault();
+                setStartToCurrent();
+            } else if (e.key === ']') {
+                e.preventDefault();
+                setEndToCurrent();
+            } else if (e.key === ',' || e.code === 'ArrowLeft') {
+                e.preventDefault();
+                stepFrame(-1);
+            } else if (e.key === '.' || e.code === 'ArrowRight') {
+                e.preventDefault();
+                stepFrame(1);
+            } else if (e.key === 'l' || e.key === 'L') {
+                e.preventDefault();
+                toggleLoopScene();
+            }
+        });
+
+        // Search Filter
+        document.getElementById('sceneSearchInput').addEventListener('input', (e) => {
+            const q = e.target.value.toLowerCase().trim();
+            scenes.forEach((s, idx) => {
+                const card = document.getElementById(`scene-card-${idx}`);
+                const op = (s.operations?.[0] || '').toLowerCase();
+                if (!q || op.includes(q) || idx.toString().includes(q)) {
+                    card.style.display = '';
+                } else {
+                    card.style.display = 'none';
+                }
+            });
+        });
+
+        window.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>

@@ -3,6 +3,8 @@
 The API key comes from the OPENROUTER_API_KEY environment variable (or is
 passed explicitly). When no key is available the client reports
 `available == False`.
+
+Optional: BatchedVlmClient for concurrent multi-call classification.
 """
 from __future__ import annotations
 
@@ -12,9 +14,12 @@ import re
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any
+from dataclasses import dataclass
 
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "qwen/qwen3.7-plus"
+DEFAULT_MODEL = "qwen/qwen3.7-flash"
 
 _JSON_BLOCK = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
@@ -139,3 +144,124 @@ class OpenRouterClient:
 
     def chat_json(self, messages: list[dict]) -> dict:
         return parse_json_reply(self.chat(messages))
+
+
+# ---------------------------------------------------------------------------
+# Batched / concurrent VLM client for multi-segment classification
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BatchedResult:
+    """Result of one call in a batch."""
+    success: bool
+    data: dict | str | None
+    error: str | None
+    latency_s: float
+    cost_usd: float | None
+
+
+class BatchedVlmClient:
+    """Concurrent VLM client: fires multiple requests in parallel using ThreadPoolExecutor.
+
+    Use this to classify multiple segments simultaneously instead of sequential calls,
+    dramatically reducing latency from minutes to seconds.
+    """
+
+    def __init__(self, model: str = DEFAULT_MODEL, api_key: str | None = None,
+                 max_workers: int = 20, timeout: float = 180.0,
+                 max_retries: int = 3, temperature: float = 0.0):
+        self.model = model
+        self.max_workers = max_workers
+        self._client = OpenRouterClient(
+            model=model, api_key=api_key, timeout=timeout,
+            max_retries=max_retries, temperature=temperature,
+        )
+        self.total_requests = 0
+        self.total_cost_usd = 0.0
+        self.total_latency_s = 0.0
+        self.results: list[BatchedResult] = []
+
+    @property
+    def available(self) -> bool:
+        return self._client.available
+
+    def _call_one(self, messages: list[dict]) -> BatchedResult:
+        """Execute a single VLM call and return the result."""
+        import time as time_module
+        t0 = time_module.monotonic()
+        try:
+            data = self._client.chat_json(messages)
+            latency = time_module.monotonic() - t0
+            cost = self._client.last_cost_usd
+            return BatchedResult(
+                success=True, data=data, error=None,
+                latency_s=latency, cost_usd=cost,
+            )
+        except Exception as e:
+            latency = time_module.monotonic() - t0
+            return BatchedResult(
+                success=False, data=None, error=str(e),
+                latency_s=latency, cost_usd=None,
+            )
+
+    def classify_batch(self, requests: list[dict],
+                      progress_callback=None) -> list[BatchedResult]:
+        """Fire all VLM requests concurrently and return results in the same order.
+
+        Args:
+            requests: List of {"messages": [...], "tag": str} dicts.
+                      "messages" is passed to chat_json().
+                      "tag" is optional label for progress reporting.
+            progress_callback: Optional callable(processed, total) for progress updates.
+
+        Returns:
+            List of BatchedResult in the same order as `requests`.
+        """
+        self.results = []
+        n = len(requests)
+
+        def work(req: dict) -> tuple[int, BatchedResult]:
+            result = self._call_one(req["messages"])
+            return req.get("_idx", 0), result
+
+        # Inject index for ordering preservation
+        indexed_requests = [{**req, "_idx": i} for i, req in enumerate(requests)]
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = {
+                executor.submit(work, req): req for req in indexed_requests
+            }
+
+            completed = 0
+            results_by_idx: dict[int, BatchedResult] = {}
+
+            for future in as_completed(futures):
+                idx, result = future.result()
+                results_by_idx[idx] = result
+                self.total_requests += 1
+                if result.success and result.cost_usd is not None:
+                    self.total_cost_usd += result.cost_usd
+                self.total_latency_s += result.latency_s
+
+                completed += 1
+                if progress_callback:
+                    progress_callback(completed, n)
+
+        # Restore original order
+        self.results = [results_by_idx[i] for i in range(n)]
+        return self.results
+
+    def summary(self) -> dict:
+        """Return a summary dict of all batched calls made."""
+        successes = sum(1 for r in self.results if r.success)
+        return {
+            "total_requests": self.total_requests,
+            "successful": successes,
+            "failed": len(self.results) - successes,
+            "total_cost_usd": round(self.total_cost_usd, 6),
+            "total_latency_s": round(self.total_latency_s, 2),
+            "avg_latency_s": round(
+                self.total_latency_s / self.total_requests, 3
+            ) if self.total_requests else 0,
+        }
+
