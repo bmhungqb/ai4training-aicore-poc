@@ -218,12 +218,24 @@ def run_step1_segmentation(video_path: Path, output_dir: Path, config: PipelineC
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
+    # Convert masks to clean contiguous boolean arrays to avoid Python pickle memory explosion
+    N_frames = len(frame_indices)
+    left_masks_arr = np.zeros((N_frames, height, width), dtype=bool)
+    right_masks_arr = np.zeros((N_frames, height, width), dtype=bool)
+    for idx, (lm, rm) in enumerate(zip(left_masks, right_masks)):
+        if lm is not None:
+            left_masks_arr[idx] = lm
+        if rm is not None:
+            right_masks_arr[idx] = rm
+    del left_masks, right_masks
+    gc.collect()
+
     # Save
-    print(f"[Step 1] Saving {len(frame_indices)} mask frames → {masks_path}...")
+    print(f"[Step 1] Saving {N_frames} mask frames → {masks_path}...")
     np.savez_compressed(
         masks_path,
-        left_masks=np.array(left_masks,   dtype=object),
-        right_masks=np.array(right_masks,  dtype=object),
+        left_masks=left_masks_arr,
+        right_masks=right_masks_arr,
         left_scores=np.asarray(left_scores,  dtype=np.float32),
         right_scores=np.asarray(right_scores, dtype=np.float32),
         frame_indices=np.asarray(frame_indices, dtype=np.int64),
