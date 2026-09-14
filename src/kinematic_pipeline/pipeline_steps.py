@@ -93,8 +93,14 @@ def run_step1_segmentation(video_path: Path, output_dir: Path, config: PipelineC
     masks_path = output_dir / f"{video_path.stem}_masks.npz"
 
     if masks_path.exists() and not config.force:
-        print(f"[Step 1] Masks already exist → skipping ({masks_path})")
-        return masks_path
+        try:
+            with np.load(masks_path, allow_pickle=True) as d:
+                _ = d["frame_indices"]
+            print(f"[Step 1] Masks already exist → skipping ({masks_path})")
+            return masks_path
+        except Exception as e:
+            print(f"[Step 1] Existing masks file {masks_path} is corrupted ({e}) → deleting and recomputing...")
+            masks_path.unlink(missing_ok=True)
 
     print("\n" + "=" * 70)
     print("STEP 1: SAM3 Hand Segmentation")
@@ -236,8 +242,14 @@ def run_step2_optical_flow(video_path: Path, masks_path: Path,
     flow_path = output_dir / f"{video_path.stem}_flow.npz"
 
     if flow_path.exists() and not config.force:
-        print(f"[Step 2] Flow already exists → skipping ({flow_path})")
-        return flow_path
+        try:
+            with np.load(flow_path) as d:
+                _ = d["flow"]
+            print(f"[Step 2] Flow already exists → skipping ({flow_path})")
+            return flow_path
+        except Exception as e:
+            print(f"[Step 2] Existing flow file {flow_path} is corrupted ({e}) → deleting and recomputing...")
+            flow_path.unlink(missing_ok=True)
 
     print("\n" + "=" * 70)
     print("STEP 2: SEA-RAFT Optical Flow Extraction")
