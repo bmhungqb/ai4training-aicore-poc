@@ -434,24 +434,26 @@ def run_step3_segmentation(video_path: Path, flow_path: Path, masks_path: Path,
     print("STEP 3: Action Segmentation by Dynamic Multi-Modal Fusion")
     print("=" * 70)
 
-    flows, left_masks, right_masks, fps = _load_flow_and_masks(flow_path, masks_path)
+    with np.load(flow_path) as fd:
+        fps = float(fd.get("fps", 25.0))
 
     # Run New Dynamic Fusion (calculate_direction_magnitude.py)
     try:
         boundaries, left_mags_s, right_mags_s = run_multimodal_dynamic_segmentation(
-            flows=flows,
-            left_masks=left_masks,
-            right_masks=right_masks,
             fps=fps,
             output_dir=output_dir,
-            min_speed=config.min_speed
+            min_speed=config.min_speed,
+            flow_path=flow_path,
+            masks_path=masks_path,
         )
         print(f"\n  ★ [Step 3] Fused {len(boundaries)-1} Segments using Dynamic Thresholds.")
     except Exception as e:
         print(f"  [Step 3] Dynamic Fusion failed: {e}")
         # Fallback empty
-        boundaries = [0, len(flows)-1]
-        left_mags_s, right_mags_s = np.zeros(len(flows)), np.zeros(len(flows))
+        with np.load(flow_path) as fd:
+            N = len(fd["flow"])
+        boundaries = [0, N - 1]
+        left_mags_s, right_mags_s = np.zeros(N), np.zeros(N)
 
     # Save
     np.save(boundaries_path, {

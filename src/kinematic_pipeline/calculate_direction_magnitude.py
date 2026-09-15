@@ -12,6 +12,7 @@ Inputs:
 """
 
 import argparse
+import gc
 from pathlib import Path
 import numpy as np
 import cv2
@@ -381,10 +382,11 @@ def main():
     print(f"Loaded {len(flows)} frames.")
 
 def run_multimodal_dynamic_segmentation(
-    flows, left_masks, right_masks, fps, output_dir,
+    flows=None, left_masks=None, right_masks=None, fps=None, output_dir=None,
     min_speed=0.5, min_distance_sec=0.5, k_std=0.7,
     noise_threshold=25.0, w_speed=0.40, w_shift=0.40, w_turb=0.20,
     erode_ksize=3,
+    flow_path=None, masks_path=None,
 ):
     """
     Computes decomposed motion (speed, angle, turbulence), normalizes them, fuses left and right hands,
@@ -397,10 +399,40 @@ def run_multimodal_dynamic_segmentation(
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    N = len(flows)
 
-    print("  [Fusion] Computing metrics for LEFT hand (with boundary erosion, RMS energy, and interpolation)...")
-    l_spds, l_angs, l_turb = compute_decomposition(flows, left_masks, min_speed=min_speed, erode_ksize=erode_ksize)
+    if flow_path is not None and masks_path is not None:
+        flow_path = Path(flow_path)
+        masks_path = Path(masks_path)
+        print("  [Fusion] Loading optical flow...")
+        with np.load(flow_path) as fd:
+            flows = fd["flow"]
+            if fps is None or fps <= 0:
+                fps = float(fd.get("fps", 25.0))
+        N = len(flows)
+
+        print("  [Fusion] Computing metrics for LEFT hand (sequential stream)...")
+        with np.load(masks_path, allow_pickle=True) as md:
+            left_masks_data = md["left_masks"]
+            l_spds, l_angs, l_turb = compute_decomposition(flows, left_masks_data, min_speed=min_speed, erode_ksize=erode_ksize)
+            del left_masks_data
+        gc.collect()
+
+        print("  [Fusion] Computing metrics for RIGHT hand (sequential stream)...")
+        with np.load(masks_path, allow_pickle=True) as md:
+            right_masks_data = md["right_masks"]
+            r_spds, r_angs, r_turb = compute_decomposition(flows, right_masks_data, min_speed=min_speed, erode_ksize=erode_ksize)
+            del right_masks_data
+
+        # Immediately free massive optical flow array to release GBs of RAM
+        del flows
+        gc.collect()
+    else:
+        N = len(flows)
+        print("  [Fusion] Computing metrics for LEFT hand (with boundary erosion, RMS energy, and interpolation)...")
+        l_spds, l_angs, l_turb = compute_decomposition(flows, left_masks, min_speed=min_speed, erode_ksize=erode_ksize)
+        print("  [Fusion] Computing metrics for RIGHT hand (with boundary erosion, RMS energy, and interpolation)...")
+        r_spds, r_angs, r_turb = compute_decomposition(flows, right_masks, min_speed=min_speed, erode_ksize=erode_ksize)
+
     sl_spds = smooth_linear(l_spds, fps)
     sl_turb = smooth_linear(l_turb, fps)
     sl_angs = smooth_circular(l_angs, fps)
@@ -413,8 +445,6 @@ def run_multimodal_dynamic_segmentation(
         nl_spds, nl_turb, nl_shift, w_speed=w_speed, w_shift=w_shift, w_turb=w_turb
     )
     
-    print("  [Fusion] Computing metrics for RIGHT hand (with boundary erosion, RMS energy, and interpolation)...")
-    r_spds, r_angs, r_turb = compute_decomposition(flows, right_masks, min_speed=min_speed, erode_ksize=erode_ksize)
     sr_spds = smooth_linear(r_spds, fps)
     sr_turb = smooth_linear(r_turb, fps)
     sr_angs = smooth_circular(r_angs, fps)
