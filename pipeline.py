@@ -47,13 +47,30 @@ def _scenes_by_name(manifest: dict) -> dict:
 
 # ---------------------------------------------------------------------------
 # Phase 1: worker action segmentation
+def _get_video_duration(video_path: Path) -> float:
+    """Returns video duration in seconds using cv2 (fast probe)."""
+    try:
+        import cv2
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            return 0.0
+        n_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        cap.release()
+        return float(n_frames / fps) if fps > 0 else 0.0
+    except Exception:
+        return 0.0
+
+
 # ---------------------------------------------------------------------------
 def run_segment(step: str | None = None, force: bool = False, visualize: bool = False,
                 mask_path: str | None = None, video_path: str | Path | None = None,
                 out_dir: str | Path | None = None, cong_doan: str | int | None = None,
                 all_data: bool = False, resize_scale: float | None = None,
                 frame_step: int | None = None, frame_by_frame: bool = False,
-                data_dir: str | Path | None = None, result_dir: str | Path | None = None) -> None:
+                data_dir: str | Path | None = None, result_dir: str | Path | None = None,
+                ignore_large: bool = False, max_duration: float | None = None,
+                sort_by_duration: bool = False) -> None:
     """Phase 1: find where the worker's actions start/stop. No VLM, no expert
     knowledge.
 
@@ -66,14 +83,25 @@ def run_segment(step: str | None = None, force: bool = False, visualize: bool = 
     under data/{cong_doan}/ are processed sequentially into data/{cong_doan}/kinematic/{stem}/.
 
     all_data: if True, processes every operation folder containing .mp4 videos in data/.
+
+    ignore_large: if True, skips videos longer than 3 minutes (180s) by default.
+
+    max_duration: maximum video duration in seconds; videos longer than this are skipped.
+
+    sort_by_duration: if True, sorts videos ascending by length so shortest run first.
     """
     base_data_dir = Path(data_dir) if data_dir else cfg1.DATA_DIR
     base_result_dir = Path(result_dir) if result_dir else (Path(out_dir) if out_dir else base_data_dir)
+
+    if ignore_large and max_duration is None:
+        max_duration = 180.0  # 3 minutes default
 
     steps = [step] if step else SEGMENT_STEPS
     for s in steps:
         if s == "kinematic":
             print("Phase 1 / kinematic: action boundary detection")
+            if max_duration is not None:
+                print(f"[Filter] Max duration filter active: skipping videos > {max_duration:.1f}s ({max_duration/60:.1f}m)")
             print("-" * 70)
             if all_data or (cong_doan is not None and str(cong_doan).strip().lower() == "all"):
                 subdirs = [p for p in base_data_dir.iterdir() if p.is_dir() and any(p.glob("*.mp4"))]
@@ -86,11 +114,17 @@ def run_segment(step: str | None = None, force: bool = False, visualize: bool = 
                 count = 0
                 for idx_cd, cd_dir in enumerate(subdirs, 1):
                     videos = sorted(cd_dir.glob("*.mp4"))
+                    if sort_by_duration:
+                        videos.sort(key=lambda v: _get_video_duration(v))
                     print(f"\n[{idx_cd}/{len(subdirs)}] === Công đoạn {cd_dir.name} ({len(videos)} video) ===")
                     for idx_v, v in enumerate(videos, 1):
                         count += 1
+                        dur_s = _get_video_duration(v)
+                        if max_duration is not None and dur_s > max_duration:
+                            print(f"  ({idx_v}/{len(videos)}) [Video {count}/{total_videos}] [SKIP - LARGE] {v.name} ({dur_s:.1f}s > {max_duration:.1f}s)")
+                            continue
                         v_out = base_result_dir / cd_dir.name / "kinematic" / v.stem
-                        print(f"  ({idx_v}/{len(videos)}) [Video {count}/{total_videos}] {v.name} -> {v_out}")
+                        print(f"  ({idx_v}/{len(videos)}) [Video {count}/{total_videos}] {v.name} ({dur_s:.1f}s) -> {v_out}")
                         v_mask = Path(mask_path) if mask_path else (v.with_suffix(".mask.png") if v.with_suffix(".mask.png").exists() else None)
                         segmenter = KinematicSegmenter(video_path=v, out_dir=v_out, mask_path=v_mask)
                         report = segmenter.run(force=force, visualize=visualize, resize_scale=resize_scale,
@@ -103,13 +137,20 @@ def run_segment(step: str | None = None, force: bool = False, visualize: bool = 
                 videos = sorted(cd_dir.glob("*.mp4"))
                 if not videos:
                     raise SystemExit(f"No .mp4 videos found in {cd_dir}")
+                if sort_by_duration:
+                    videos.sort(key=lambda v: _get_video_duration(v))
                 print(f"Found {len(videos)} video(s) for công đoạn {cong_doan} in {cd_dir}:")
                 for i, v in enumerate(videos, 1):
-                    print(f"  {i}. {v.name}")
+                    dur_s = _get_video_duration(v)
+                    print(f"  {i}. {v.name} ({dur_s:.1f}s)")
 
                 for i, v in enumerate(videos, 1):
+                    dur_s = _get_video_duration(v)
+                    if max_duration is not None and dur_s > max_duration:
+                        print(f"\n[{i}/{len(videos)}] [SKIP - LARGE] {v.name} ({dur_s:.1f}s > {max_duration:.1f}s)")
+                        continue
                     v_out = base_result_dir / str(cong_doan) / "kinematic" / v.stem
-                    print(f"\n[{i}/{len(videos)}] Processing: {v.name} -> {v_out}")
+                    print(f"\n[{i}/{len(videos)}] Processing: {v.name} ({dur_s:.1f}s) -> {v_out}")
                     # auto-detect mask if not explicitly passed
                     v_mask = Path(mask_path) if mask_path else (v.with_suffix(".mask.png") if v.with_suffix(".mask.png").exists() else None)
                     segmenter = KinematicSegmenter(video_path=v, out_dir=v_out, mask_path=v_mask)
@@ -417,9 +458,14 @@ def run_all(vlm_model: str = cfg2e.VLM_MODEL, model: str = cfg2c.MODEL,
             max_workers: int = 15,
             max_window_duration: float = 4.0,
             use_motion_composite: bool = True,
-            max_frames_per_call: int = 4) -> None:
+            max_frames_per_call: int = 4,
+            ignore_large: bool = False,
+            max_duration: float | None = None,
+            sort_by_duration: bool = False) -> None:
     run_segment(force=force_segment, visualize=visualize, mask_path=mask_path,
-                cong_doan=cong_doan, video_path=video_path, out_dir=out_dir)
+                cong_doan=cong_doan, video_path=video_path, out_dir=out_dir,
+                ignore_large=ignore_large, max_duration=max_duration,
+                sort_by_duration=sort_by_duration)
     run_analyze(vlm_model=vlm_model, model=model, cut=cut, save_crop_frames=save_crop_frames,
                 visualize=visualize, force_kinematic=force_kinematic_expert,
                 mask_path=mask_path, expert_mask_path=expert_mask_path,
@@ -476,6 +522,12 @@ def main() -> None:
                     help="process every Nth frame in Phase 1 (default: 1; use 2 to halve memory and 2x speed)")
     ap.add_argument("--frame-by-frame", action="store_true",
                     help="run SAM3 in stateless frame-by-frame mode (saves RAM on long videos)")
+    ap.add_argument("--ignore-large", action="store_true",
+                    help="skip large videos (> 3 minutes / 180s by default) during Phase 1 segmentation")
+    ap.add_argument("--max-duration", type=float, default=None,
+                    help="maximum video duration in seconds to process in Phase 1 (longer videos are skipped)")
+    ap.add_argument("--sort-by-duration", action="store_true",
+                    help="process shorter videos first within each operation folder")
     # Batched classification (classify step)
     ap.add_argument("--batched", action="store_true",
                     help="use BatchedSegmentClassifier with macro-window + motion composite + concurrent VLM calls (classify step)")
@@ -497,7 +549,9 @@ def main() -> None:
                    cong_doan=args.cong_doan, all_data=args.all_data,
                    resize_scale=args.resize_scale, frame_step=args.frame_step,
                    frame_by_frame=args.frame_by_frame,
-                   data_dir=args.data_dir, result_dir=args.result_dir)
+                   data_dir=args.data_dir, result_dir=args.result_dir,
+                   ignore_large=args.ignore_large, max_duration=args.max_duration,
+                   sort_by_duration=args.sort_by_duration)
     elif args.phase == "analyze":
         run_analyze(step=args.step, vlm_model=args.vlm_model, model=args.model, cut=args.cut,
                    save_crop_frames=args.save_crop_frames, visualize=args.visualize,
@@ -519,7 +573,9 @@ def main() -> None:
                batched=args.batched, max_workers=args.max_workers,
                max_window_duration=args.max_window_duration,
                use_motion_composite=not args.no_motion_composite,
-               max_frames_per_call=args.max_frames_per_call)
+               max_frames_per_call=args.max_frames_per_call,
+               ignore_large=args.ignore_large, max_duration=args.max_duration,
+               sort_by_duration=args.sort_by_duration)
 
 
 if __name__ == "__main__":
