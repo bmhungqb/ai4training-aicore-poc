@@ -13,6 +13,9 @@ Inputs:
 
 import argparse
 import gc
+import pickle
+import queue
+import threading
 from pathlib import Path
 import zipfile
 import numpy as np
@@ -150,6 +153,85 @@ def stream_flow_frames(flow_path):
             yield i, np.array(flow_mmap[i]), (N, H, W), fps
 
 
+def _stream_pickled_object_array(fileobj, mem_threshold: int = 1024):
+    """Yields items of a pickled 1-D ndarray(dtype=object) one at a time,
+    without ever materializing the full Python list (or keeping past items
+    alive) in memory.
+
+    numpy pickles an object array as: ndarray.__setstate__ called with a
+    plain Python list built via pickle APPEND/APPENDS opcodes. The stock
+    Unpickler accumulates all items into that list before returning, which
+    is exactly the multi-GB spike we're trying to avoid. We run the
+    unpickler in a background thread with dispatch overrides on APPEND(S)
+    that push each item onto a small bounded queue as it's decoded, and
+    store a lightweight `None` placeholder in the being-built list so the
+    unpickler's internal bookkeeping (length checks, __setstate__) still
+    sees a normal list without the actual arrays retained there.
+
+    That alone isn't sufficient, though: pickle's own `Unpickler.memo` dict
+    (used to resolve backreferences, e.g. shared numpy dtype objects) also
+    keeps a strong reference to *every* object it decodes — including the
+    raw bytes payload and reconstructed array of each mask frame — for the
+    lifetime of the unpickler. Left unchecked this alone re-introduces
+    O(N frames) growth even though the queue itself is small. We evict any
+    large (>= mem_threshold bytes) bytes/ndarray memo entries right after
+    each APPEND/APPENDS, once they've been handed off to the queue and are
+    no longer possibly referenced again by the stream (memo backreferences
+    to arrays only make sense forward from where they were first defined,
+    which is the item that was just appended).
+    """
+    q: queue.Queue = queue.Queue(maxsize=2)
+    SENTINEL = object()
+    exc_holder: list = []
+
+    class _StreamingUnpickler(pickle._Unpickler):
+        def _purge_large_memo_entries(self):
+            memo = self.memo
+            to_del = [k for k, v in memo.items()
+                      if isinstance(v, (np.ndarray, bytes, bytearray))
+                      and (v.nbytes if isinstance(v, np.ndarray) else len(v)) >= mem_threshold]
+            for k in to_del:
+                del memo[k]
+
+        def load_append(self):
+            stack = self.stack
+            value = stack.pop()
+            stack[-1].append(None)
+            q.put(value)
+            self._purge_large_memo_entries()
+
+        def load_appends(self):
+            items = self.pop_mark()
+            stack_top = self.stack[-1]
+            stack_top.extend([None] * len(items))
+            for item in items:
+                q.put(item)
+            self._purge_large_memo_entries()
+
+        dispatch = pickle._Unpickler.dispatch.copy()
+        dispatch[pickle.APPEND[0]] = load_append
+        dispatch[pickle.APPENDS[0]] = load_appends
+
+    def _worker():
+        try:
+            _StreamingUnpickler(fileobj).load()
+        except Exception as e:  # noqa: BLE001
+            exc_holder.append(e)
+        finally:
+            q.put(SENTINEL)
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    while True:
+        item = q.get()
+        if item is SENTINEL:
+            break
+        yield item
+    t.join()
+    if exc_holder:
+        raise exc_holder[0]
+
+
 def stream_mask_frames(masks_path):
     """
     Streams (left_mask, right_mask) pairs one frame at a time from a masks .npz
@@ -201,17 +283,23 @@ def stream_mask_frames(masks_path):
             peek_shape, peek_dtype = _parse_npy_header(fp)
 
     if peek_dtype == object:
-        # Object arrays require pickle — np.load is unavoidable.
-        # These are typically very sparse (None + small bool arrays) so they
-        # compress well and are not the primary GB culprit; but we still
-        # iterate frame-by-frame to avoid keeping two big object arrays alive
-        # at the same time as the streaming flow data.
-        print("  [stream_mask_frames] object-dtype masks → np.load fallback")
-        data = np.load(masks_path, allow_pickle=True)
-        lm, rm = data["left_masks"], data["right_masks"]
-        N = len(lm)
-        for i in range(N):
-            yield i, lm[i], rm[i], N
+        # Object arrays (legacy masks with None entries for undetected frames)
+        # can't be reconstructed via np.frombuffer — but we can still avoid
+        # materializing the full list by driving the pickle stream ourselves
+        # (see _stream_pickled_object_array), keeping peak RAM at O(1 frame)
+        # instead of O(N frames) like a plain np.load(allow_pickle=True) would.
+        print("  [stream_mask_frames] object-dtype masks → streaming unpickler (O(1) RAM)")
+        N = int(peek_shape[0])
+        with zipfile.ZipFile(masks_path, "r") as zl, \
+             zipfile.ZipFile(masks_path, "r") as zr:
+            with zl.open("left_masks.npy") as fl, \
+                 zr.open("right_masks.npy") as fr:
+                _parse_npy_header(fl)
+                _parse_npy_header(fr)
+                for i, (l_mask, r_mask) in enumerate(
+                    zip(_stream_pickled_object_array(fl), _stream_pickled_object_array(fr))
+                ):
+                    yield i, l_mask, r_mask, N
         return
 
     # ── Numeric dtype: true frame-by-frame streaming ───────────────────────
