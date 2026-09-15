@@ -150,6 +150,65 @@ def stream_flow_frames(flow_path):
             yield i, np.array(flow_mmap[i]), (N, H, W), fps
 
 
+def stream_mask_frames(masks_path):
+    """
+    Streams (left_mask, right_mask) pairs one frame at a time from a masks .npz
+    archive without loading the full arrays into RAM.
+
+    .npz files are zip archives — numpy's mmap_mode='r' is silently ignored for
+    them, so the only way to avoid a multi-GB allocation is to read both
+    'left_masks.npy' and 'right_masks.npy' incrementally.  We open the same zip
+    file with two independent ZipFile instances (separate OS file descriptors, each
+    with its own decompressor state) and advance them in lock-step.
+
+    Yields:
+        (i, left_mask_i, right_mask_i, N_frames)
+    """
+    masks_path = Path(masks_path)
+
+    def _parse_npy_header(f):
+        magic = f.read(6)
+        if magic != b"\x93NUMPY":
+            raise ValueError(f"Invalid NPY magic in {masks_path}")
+        major = f.read(1)[0]
+        f.read(1)  # minor version — ignored
+        header_len = (int.from_bytes(f.read(2), "little") if major == 1
+                      else int.from_bytes(f.read(4), "little"))
+        header = eval(f.read(header_len).decode("ascii"))  # safe: numpy header
+        return header["shape"], np.dtype(header["descr"])
+
+    if masks_path.suffix != ".npz":
+        # Fallback for plain npy / other formats
+        data = np.load(masks_path, allow_pickle=True)
+        lm, rm = data["left_masks"], data["right_masks"]
+        for i in range(len(lm)):
+            yield i, np.array(lm[i]), np.array(rm[i]), len(lm)
+        return
+
+    # Two independent file handles → two independent decompressors → no shared state
+    with zipfile.ZipFile(masks_path, "r") as zl, \
+         zipfile.ZipFile(masks_path, "r") as zr:
+        with zl.open("left_masks.npy") as fl, \
+             zr.open("right_masks.npy") as fr:
+
+            l_shape, l_dtype = _parse_npy_header(fl)
+            r_shape, r_dtype = _parse_npy_header(fr)
+
+            N = l_shape[0]
+            l_frame_bytes = int(np.prod(l_shape[1:])) * l_dtype.itemsize
+            r_frame_bytes = int(np.prod(r_shape[1:])) * r_dtype.itemsize
+
+            for i in range(N):
+                l_raw = fl.read(l_frame_bytes)
+                r_raw = fr.read(r_frame_bytes)
+                if len(l_raw) < l_frame_bytes or len(r_raw) < r_frame_bytes:
+                    break
+                # .copy() detaches from the read buffer so it can be freed
+                l_mask = np.frombuffer(l_raw, dtype=l_dtype).reshape(l_shape[1:]).copy()
+                r_mask = np.frombuffer(r_raw, dtype=r_dtype).reshape(r_shape[1:]).copy()
+                yield i, l_mask, r_mask, N
+
+
 def _process_hand_frame(flow_frame, mask_raw, H, W, kernel, min_speed):
     """Processes optical flow for a single hand mask in a single frame."""
     mask = _safe_mask(mask_raw)
@@ -279,10 +338,19 @@ def smooth_circular(angles_deg, fps, window_sec=0.3, max_gap_sec=0.6):
     
     smoothed_rad = np.arctan2(sin_smooth, cos_smooth)
     
-    # Bridge short gaps (<= max_gap_sec), keep NaN only for long absences
+    # Bridge short gaps (<= max_gap_sec), keep NaN only for long absences.
+    # Use searchsorted (O(N log M)) instead of the O(N×M) outer-product to avoid
+    # allocating a potentially huge temporary matrix.
     max_gap_frames = int(fps * max_gap_sec)
-    min_dist = np.min(np.abs(idx[:, None] - valid_idx[None, :]), axis=1)
+    ins = np.searchsorted(valid_idx, idx)  # insertion points in valid_idx
+    # Clamp to valid range, then check both neighbours
+    lo = np.clip(ins - 1, 0, len(valid_idx) - 1)
+    hi = np.clip(ins,     0, len(valid_idx) - 1)
+    dist_lo = np.abs(idx - valid_idx[lo])
+    dist_hi = np.abs(idx - valid_idx[hi])
+    min_dist = np.minimum(dist_lo, dist_hi)
     keep_mask = min_dist <= max_gap_frames
+
     smoothed[keep_mask] = np.degrees(smoothed_rad)[keep_mask]
     
     return smoothed
@@ -459,10 +527,7 @@ def run_multimodal_dynamic_segmentation(
     if flow_path is not None and masks_path is not None:
         flow_path = Path(flow_path)
         masks_path = Path(masks_path)
-        print("  [Fusion] Streaming optical flow per-frame with dual-hand extraction...")
-        with np.load(masks_path, allow_pickle=True) as md:
-            left_masks_data = md["left_masks"]
-            right_masks_data = md["right_masks"]
+        print("  [Fusion] Streaming flow + masks frame-by-frame (O(1) RAM)...")
 
         kernel = np.ones((erode_ksize, erode_ksize), np.uint8) if erode_ksize > 1 else None
 
@@ -470,21 +535,24 @@ def run_multimodal_dynamic_segmentation(
         r_spds_list, r_angs_list, r_turb_list, r_valid_list = [], [], [], []
 
         flow_fps = None
-        for i, flow_i, (N_frames, H, W), f_fps in stream_flow_frames(flow_path):
+        # stream_mask_frames and stream_flow_frames both yield one frame at a time,
+        # keeping peak RAM at O(1 frame) rather than O(N frames).
+        for (mi, m_l, m_r, _N), (fi, flow_i, (N_frames, H, W), f_fps) in zip(
+            stream_mask_frames(masks_path),
+            stream_flow_frames(flow_path),
+        ):
             if flow_fps is None:
                 flow_fps = f_fps
 
-            # Left hand
-            m_l = left_masks_data[i] if i < len(left_masks_data) else None
             s, a, t, v = _process_hand_frame(flow_i, m_l, H, W, kernel, min_speed)
             l_spds_list.append(s); l_angs_list.append(a); l_turb_list.append(t); l_valid_list.append(v)
 
-            # Right hand
-            m_r = right_masks_data[i] if i < len(right_masks_data) else None
             s, a, t, v = _process_hand_frame(flow_i, m_r, H, W, kernel, min_speed)
             r_spds_list.append(s); r_angs_list.append(a); r_turb_list.append(t); r_valid_list.append(v)
 
-        del left_masks_data, right_masks_data
+            # Explicitly release per-frame buffers
+            del flow_i, m_l, m_r
+
         gc.collect()
 
         if fps is None or fps <= 0:
