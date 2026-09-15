@@ -14,6 +14,7 @@ Inputs:
 import argparse
 import gc
 from pathlib import Path
+import zipfile
 import numpy as np
 import cv2
 try:
@@ -99,6 +100,98 @@ def load_data(flow_path: str, mask_path: str):
     fps = float(flow_data.get("fps", 25.0))
     return flows, left_masks, right_masks, fps
 
+def stream_flow_frames(flow_path):
+    """
+    Streams optical flow frames one by one from a .npz archive or .npy file
+    without loading the full multi-gigabyte array into memory.
+
+    Yields:
+        (i, flow_frame, (N, H, W), fps)
+    """
+    flow_path = Path(flow_path)
+    if flow_path.suffix == ".npz":
+        with zipfile.ZipFile(flow_path, "r") as z:
+            fps = 25.0
+            if "fps.npy" in z.namelist():
+                with z.open("fps.npy") as f_fps:
+                    fps = float(np.load(f_fps))
+
+            with z.open("flow.npy") as f:
+                magic = f.read(6)
+                if magic != b"\x93NUMPY":
+                    raise ValueError(f"Invalid NPY file in flow archive: {flow_path}")
+                major = f.read(1)[0]
+                f.read(1)  # minor
+                if major == 1:
+                    header_len = int.from_bytes(f.read(2), "little")
+                else:
+                    header_len = int.from_bytes(f.read(4), "little")
+
+                header_str = f.read(header_len).decode("ascii")
+                header = eval(header_str)
+                shape = header["shape"]
+                N, H, W = shape[0], shape[1], shape[2]
+                C = shape[3] if len(shape) > 3 else 2
+                dtype = np.dtype(header["descr"])
+                frame_bytes = H * W * C * dtype.itemsize
+
+                for i in range(N):
+                    raw = f.read(frame_bytes)
+                    if len(raw) < frame_bytes:
+                        break
+                    frame = np.frombuffer(raw, dtype=dtype).reshape(H, W, C)
+                    yield i, frame, (N, H, W), fps
+    else:
+        flow_mmap = np.load(flow_path, mmap_mode="r")
+        shape = flow_mmap.shape
+        N, H, W = shape[0], shape[1], shape[2]
+        fps = 25.0
+        for i in range(N):
+            yield i, np.array(flow_mmap[i]), (N, H, W), fps
+
+
+def _process_hand_frame(flow_frame, mask_raw, H, W, kernel, min_speed):
+    """Processes optical flow for a single hand mask in a single frame."""
+    mask = _safe_mask(mask_raw)
+    if mask is None:
+        return np.nan, np.nan, np.nan, False
+    if mask.shape != (H, W):
+        mask = cv2.resize(mask.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST).astype(bool)
+    if kernel is not None:
+        eroded = cv2.erode(mask.astype(np.uint8), kernel, iterations=1).astype(bool)
+        if eroded.any():
+            mask = eroded
+    hand_flow = flow_frame[mask]
+    if len(hand_flow) == 0:
+        return np.nan, np.nan, np.nan, False
+
+    u_vals = hand_flow[:, 0]
+    v_vals = hand_flow[:, 1]
+    pixel_speeds = np.sqrt(u_vals**2 + v_vals**2)
+
+    u_global = np.median(u_vals)
+    v_global = np.median(v_vals)
+    med_speed = float(np.sqrt(u_global**2 + v_global**2))
+    rms_speed = float(np.sqrt(np.mean(pixel_speeds**2)))
+
+    speed = 0.5 * med_speed + 0.5 * rms_speed
+
+    diff_vectors = hand_flow - np.array([u_global, v_global])
+    turbulence = float(np.mean(np.linalg.norm(diff_vectors, axis=1)))
+
+    angle = np.nan
+    if med_speed >= min_speed:
+        angle = np.degrees(np.arctan2(v_global, u_global))
+    elif rms_speed >= min_speed:
+        top_k = max(1, int(0.3 * len(pixel_speeds)))
+        fast_idx = np.argpartition(pixel_speeds, -top_k)[-top_k:]
+        u_active = np.mean(u_vals[fast_idx])
+        v_active = np.mean(v_vals[fast_idx])
+        angle = np.degrees(np.arctan2(v_active, u_active))
+
+    return speed, angle, turbulence, True
+
+
 def compute_decomposition(flows, masks, min_speed=0.3, erode_ksize=3):
     """
     Computes Global Speed, Angle, and Local Turbulence for a given hand mask over time.
@@ -120,50 +213,13 @@ def compute_decomposition(flows, masks, min_speed=0.3, erode_ksize=3):
     kernel = np.ones((erode_ksize, erode_ksize), np.uint8) if erode_ksize > 1 else None
 
     for i in range(N):
-        mask = _safe_mask(masks[i]) if i < len(masks) else None
-        if mask is not None:
-            if mask.shape != (H, W):
-                mask = cv2.resize(mask.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST).astype(bool)
-            
-            # 1. Mask Boundary Erosion: remove 1-2 edge pixels contaminated by background
-            if kernel is not None:
-                eroded = cv2.erode(mask.astype(np.uint8), kernel, iterations=1).astype(bool)
-                if eroded.any():
-                    mask = eroded
-
-            hand_flow = flows[i][mask]
-            if len(hand_flow) > 0:
-                u_vals = hand_flow[:, 0]
-                v_vals = hand_flow[:, 1]
-                pixel_speeds = np.sqrt(u_vals**2 + v_vals**2)
-
-                # 2. Combined Translation (Median) + RMS Energy
-                u_global = np.median(u_vals)
-                v_global = np.median(v_vals)
-                med_speed = float(np.sqrt(u_global**2 + v_global**2))
-                rms_speed = float(np.sqrt(np.mean(pixel_speeds**2)))
-
-                # Preserve finger activity: when wrist rests, rms_speed keeps speed > 0
-                speed = 0.5 * med_speed + 0.5 * rms_speed
-
-                # Local Turbulence: deviation from global translation
-                diff_vectors = hand_flow - np.array([u_global, v_global])
-                turbulence = float(np.mean(np.linalg.norm(diff_vectors, axis=1)))
-
-                global_speeds[i] = speed
-                turbulences[i] = turbulence
-                has_valid_mask[i] = True
-
-                # Direction computation
-                if med_speed >= min_speed:
-                    global_angles[i] = np.degrees(np.arctan2(v_global, u_global))
-                elif rms_speed >= min_speed:
-                    # If whole hand translation is small, use dominant direction of active pixels (fingers)
-                    top_k = max(1, int(0.3 * len(pixel_speeds)))
-                    fast_idx = np.argpartition(pixel_speeds, -top_k)[-top_k:]
-                    u_active = np.mean(u_vals[fast_idx])
-                    v_active = np.mean(v_vals[fast_idx])
-                    global_angles[i] = np.degrees(np.arctan2(v_active, u_active))
+        m = masks[i] if i < len(masks) else None
+        s, a, t, v = _process_hand_frame(flows[i], m, H, W, kernel, min_speed)
+        if v:
+            global_speeds[i] = s
+            global_angles[i] = a
+            turbulences[i] = t
+            has_valid_mask[i] = True
 
     # 3. Temporal Interpolation across missing/dropped masks
     valid_idx = np.where(has_valid_mask)[0]
@@ -403,29 +459,64 @@ def run_multimodal_dynamic_segmentation(
     if flow_path is not None and masks_path is not None:
         flow_path = Path(flow_path)
         masks_path = Path(masks_path)
-        print("  [Fusion] Loading optical flow...")
-        with np.load(flow_path) as fd:
-            flows = fd["flow"]
-            if fps is None or fps <= 0:
-                fps = float(fd.get("fps", 25.0))
-        N = len(flows)
-
-        print("  [Fusion] Computing metrics for LEFT hand (sequential stream)...")
+        print("  [Fusion] Streaming optical flow per-frame with dual-hand extraction...")
         with np.load(masks_path, allow_pickle=True) as md:
             left_masks_data = md["left_masks"]
-            l_spds, l_angs, l_turb = compute_decomposition(flows, left_masks_data, min_speed=min_speed, erode_ksize=erode_ksize)
-            del left_masks_data
-        gc.collect()
-
-        print("  [Fusion] Computing metrics for RIGHT hand (sequential stream)...")
-        with np.load(masks_path, allow_pickle=True) as md:
             right_masks_data = md["right_masks"]
-            r_spds, r_angs, r_turb = compute_decomposition(flows, right_masks_data, min_speed=min_speed, erode_ksize=erode_ksize)
-            del right_masks_data
 
-        # Immediately free massive optical flow array to release GBs of RAM
-        del flows
+        kernel = np.ones((erode_ksize, erode_ksize), np.uint8) if erode_ksize > 1 else None
+
+        l_spds_list, l_angs_list, l_turb_list, l_valid_list = [], [], [], []
+        r_spds_list, r_angs_list, r_turb_list, r_valid_list = [], [], [], []
+
+        flow_fps = None
+        for i, flow_i, (N_frames, H, W), f_fps in stream_flow_frames(flow_path):
+            if flow_fps is None:
+                flow_fps = f_fps
+
+            # Left hand
+            m_l = left_masks_data[i] if i < len(left_masks_data) else None
+            s, a, t, v = _process_hand_frame(flow_i, m_l, H, W, kernel, min_speed)
+            l_spds_list.append(s); l_angs_list.append(a); l_turb_list.append(t); l_valid_list.append(v)
+
+            # Right hand
+            m_r = right_masks_data[i] if i < len(right_masks_data) else None
+            s, a, t, v = _process_hand_frame(flow_i, m_r, H, W, kernel, min_speed)
+            r_spds_list.append(s); r_angs_list.append(a); r_turb_list.append(t); r_valid_list.append(v)
+
+        del left_masks_data, right_masks_data
         gc.collect()
+
+        if fps is None or fps <= 0:
+            fps = float(flow_fps) if flow_fps is not None else 25.0
+
+        N = len(l_spds_list)
+        l_spds = np.array(l_spds_list, dtype=np.float32)
+        l_angs = np.array(l_angs_list, dtype=np.float32)
+        l_turb = np.array(l_turb_list, dtype=np.float32)
+        l_valid = np.array(l_valid_list, dtype=bool)
+
+        r_spds = np.array(r_spds_list, dtype=np.float32)
+        r_angs = np.array(r_angs_list, dtype=np.float32)
+        r_turb = np.array(r_turb_list, dtype=np.float32)
+        r_valid = np.array(r_valid_list, dtype=bool)
+
+        all_idx = np.arange(N)
+        v_l = np.where(l_valid)[0]
+        if len(v_l) > 0:
+            l_spds = np.interp(all_idx, v_l, l_spds[v_l]).astype(np.float32)
+            l_turb = np.interp(all_idx, v_l, l_turb[v_l]).astype(np.float32)
+        else:
+            l_spds = np.zeros(N, dtype=np.float32)
+            l_turb = np.zeros(N, dtype=np.float32)
+
+        v_r = np.where(r_valid)[0]
+        if len(v_r) > 0:
+            r_spds = np.interp(all_idx, v_r, r_spds[v_r]).astype(np.float32)
+            r_turb = np.interp(all_idx, v_r, r_turb[v_r]).astype(np.float32)
+        else:
+            r_spds = np.zeros(N, dtype=np.float32)
+            r_turb = np.zeros(N, dtype=np.float32)
     else:
         N = len(flows)
         print("  [Fusion] Computing metrics for LEFT hand (with boundary erosion, RMS energy, and interpolation)...")

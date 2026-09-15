@@ -450,8 +450,11 @@ def run_step3_segmentation(video_path: Path, flow_path: Path, masks_path: Path,
     except Exception as e:
         print(f"  [Step 3] Dynamic Fusion failed: {e}")
         # Fallback empty
-        with np.load(flow_path) as fd:
-            N = len(fd["flow"])
+        try:
+            with np.load(masks_path, allow_pickle=True) as md:
+                N = len(md["left_masks"])
+        except Exception:
+            N = 100
         boundaries = [0, N - 1]
         left_mags_s, right_mags_s = np.zeros(N), np.zeros(N)
 
