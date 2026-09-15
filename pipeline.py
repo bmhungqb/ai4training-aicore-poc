@@ -70,7 +70,7 @@ def run_segment(step: str | None = None, force: bool = False, visualize: bool = 
                 frame_step: int | None = None, frame_by_frame: bool = False,
                 data_dir: str | Path | None = None, result_dir: str | Path | None = None,
                 ignore_large: bool = False, max_duration: float | None = None,
-                sort_by_duration: bool = False) -> None:
+                sort_by_duration: bool = False, largest_first: bool = False) -> None:
     """Phase 1: find where the worker's actions start/stop. No VLM, no expert
     knowledge.
 
@@ -89,6 +89,9 @@ def run_segment(step: str | None = None, force: bool = False, visualize: bool = 
     max_duration: maximum video duration in seconds; videos longer than this are skipped.
 
     sort_by_duration: if True, sorts videos ascending by length so shortest run first.
+
+    largest_first: if True, sorts videos descending by length so longest/largest run first.
+    When used with --all-data, sorts across the entire dataset globally.
     """
     base_data_dir = Path(data_dir) if data_dir else cfg1.DATA_DIR
     base_result_dir = Path(result_dir) if result_dir else (Path(out_dir) if out_dir else base_data_dir)
@@ -111,25 +114,46 @@ def run_segment(step: str | None = None, force: bool = False, visualize: bool = 
                 total_videos = sum(len(list(p.glob("*.mp4"))) for p in subdirs)
                 print(f"Scanning {base_data_dir}/: Found {len(subdirs)} operation folder(s) with {total_videos} video(s) total.")
 
-                count = 0
-                for idx_cd, cd_dir in enumerate(subdirs, 1):
-                    videos = sorted(cd_dir.glob("*.mp4"))
-                    if sort_by_duration:
-                        videos.sort(key=lambda v: _get_video_duration(v))
-                    print(f"\n[{idx_cd}/{len(subdirs)}] === Công đoạn {cd_dir.name} ({len(videos)} video) ===")
-                    for idx_v, v in enumerate(videos, 1):
-                        count += 1
-                        dur_s = _get_video_duration(v)
+                if largest_first:
+                    # Global largest-first sort across all folders
+                    all_vids = []
+                    for cd_dir in subdirs:
+                        for v in cd_dir.glob("*.mp4"):
+                            all_vids.append((cd_dir, v, _get_video_duration(v)))
+                    all_vids.sort(key=lambda item: item[2], reverse=True)
+
+                    print(f"\n[Mode: largest-first] Processing {len(all_vids)} videos globally sorted by descending duration:")
+                    for idx_v, (cd_dir, v, dur_s) in enumerate(all_vids, 1):
                         if max_duration is not None and dur_s > max_duration:
-                            print(f"  ({idx_v}/{len(videos)}) [Video {count}/{total_videos}] [SKIP - LARGE] {v.name} ({dur_s:.1f}s > {max_duration:.1f}s)")
+                            print(f"\n[{idx_v}/{len(all_vids)}] [SKIP - LARGE] cd{cd_dir.name}/{v.name} ({dur_s:.1f}s > {max_duration:.1f}s)")
                             continue
                         v_out = base_result_dir / cd_dir.name / "kinematic" / v.stem
-                        print(f"  ({idx_v}/{len(videos)}) [Video {count}/{total_videos}] {v.name} ({dur_s:.1f}s) -> {v_out}")
+                        print(f"\n[{idx_v}/{len(all_vids)}] Processing cd{cd_dir.name}: {v.name} ({dur_s:.1f}s) -> {v_out}")
                         v_mask = Path(mask_path) if mask_path else (v.with_suffix(".mask.png") if v.with_suffix(".mask.png").exists() else None)
                         segmenter = KinematicSegmenter(video_path=v, out_dir=v_out, mask_path=v_mask)
                         report = segmenter.run(force=force, visualize=visualize, resize_scale=resize_scale,
                                                frame_step=frame_step, frame_by_frame=frame_by_frame)
                         print(f"    -> Ready: {report.n_segments} segments -> {v_out / 'action_segments.json'}")
+                else:
+                    count = 0
+                    for idx_cd, cd_dir in enumerate(subdirs, 1):
+                        videos = sorted(cd_dir.glob("*.mp4"))
+                        if sort_by_duration:
+                            videos.sort(key=lambda v: _get_video_duration(v))
+                        print(f"\n[{idx_cd}/{len(subdirs)}] === Công đoạn {cd_dir.name} ({len(videos)} video) ===")
+                        for idx_v, v in enumerate(videos, 1):
+                            count += 1
+                            dur_s = _get_video_duration(v)
+                            if max_duration is not None and dur_s > max_duration:
+                                print(f"  ({idx_v}/{len(videos)}) [Video {count}/{total_videos}] [SKIP - LARGE] {v.name} ({dur_s:.1f}s > {max_duration:.1f}s)")
+                                continue
+                            v_out = base_result_dir / cd_dir.name / "kinematic" / v.stem
+                            print(f"  ({idx_v}/{len(videos)}) [Video {count}/{total_videos}] {v.name} ({dur_s:.1f}s) -> {v_out}")
+                            v_mask = Path(mask_path) if mask_path else (v.with_suffix(".mask.png") if v.with_suffix(".mask.png").exists() else None)
+                            segmenter = KinematicSegmenter(video_path=v, out_dir=v_out, mask_path=v_mask)
+                            report = segmenter.run(force=force, visualize=visualize, resize_scale=resize_scale,
+                                                   frame_step=frame_step, frame_by_frame=frame_by_frame)
+                            print(f"    -> Ready: {report.n_segments} segments -> {v_out / 'action_segments.json'}")
             elif cong_doan is not None:
                 cd_dir = base_data_dir / str(cong_doan)
                 if not cd_dir.is_dir():
@@ -137,7 +161,9 @@ def run_segment(step: str | None = None, force: bool = False, visualize: bool = 
                 videos = sorted(cd_dir.glob("*.mp4"))
                 if not videos:
                     raise SystemExit(f"No .mp4 videos found in {cd_dir}")
-                if sort_by_duration:
+                if largest_first:
+                    videos.sort(key=lambda v: _get_video_duration(v), reverse=True)
+                elif sort_by_duration:
                     videos.sort(key=lambda v: _get_video_duration(v))
                 print(f"Found {len(videos)} video(s) for công đoạn {cong_doan} in {cd_dir}:")
                 for i, v in enumerate(videos, 1):
@@ -461,11 +487,12 @@ def run_all(vlm_model: str = cfg2e.VLM_MODEL, model: str = cfg2c.MODEL,
             max_frames_per_call: int = 4,
             ignore_large: bool = False,
             max_duration: float | None = None,
-            sort_by_duration: bool = False) -> None:
+            sort_by_duration: bool = False,
+            largest_first: bool = False) -> None:
     run_segment(force=force_segment, visualize=visualize, mask_path=mask_path,
                 cong_doan=cong_doan, video_path=video_path, out_dir=out_dir,
                 ignore_large=ignore_large, max_duration=max_duration,
-                sort_by_duration=sort_by_duration)
+                sort_by_duration=sort_by_duration, largest_first=largest_first)
     run_analyze(vlm_model=vlm_model, model=model, cut=cut, save_crop_frames=save_crop_frames,
                 visualize=visualize, force_kinematic=force_kinematic_expert,
                 mask_path=mask_path, expert_mask_path=expert_mask_path,
@@ -528,6 +555,8 @@ def main() -> None:
                     help="maximum video duration in seconds to process in Phase 1 (longer videos are skipped)")
     ap.add_argument("--sort-by-duration", action="store_true",
                     help="process shorter videos first within each operation folder")
+    ap.add_argument("--largest-first", action="store_true",
+                    help="process longest/largest videos first (descending order). When used with --all-data, sorts globally across all folders")
     # Batched classification (classify step)
     ap.add_argument("--batched", action="store_true",
                     help="use BatchedSegmentClassifier with macro-window + motion composite + concurrent VLM calls (classify step)")
@@ -551,7 +580,8 @@ def main() -> None:
                    frame_by_frame=args.frame_by_frame,
                    data_dir=args.data_dir, result_dir=args.result_dir,
                    ignore_large=args.ignore_large, max_duration=args.max_duration,
-                   sort_by_duration=args.sort_by_duration)
+                   sort_by_duration=args.sort_by_duration,
+                   largest_first=args.largest_first)
     elif args.phase == "analyze":
         run_analyze(step=args.step, vlm_model=args.vlm_model, model=args.model, cut=args.cut,
                    save_crop_frames=args.save_crop_frames, visualize=args.visualize,
@@ -575,7 +605,8 @@ def main() -> None:
                use_motion_composite=not args.no_motion_composite,
                max_frames_per_call=args.max_frames_per_call,
                ignore_large=args.ignore_large, max_duration=args.max_duration,
-               sort_by_duration=args.sort_by_duration)
+               sort_by_duration=args.sort_by_duration,
+               largest_first=args.largest_first)
 
 
 if __name__ == "__main__":
