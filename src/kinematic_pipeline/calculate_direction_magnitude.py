@@ -161,6 +161,11 @@ def stream_mask_frames(masks_path):
     file with two independent ZipFile instances (separate OS file descriptors, each
     with its own decompressor state) and advance them in lock-step.
 
+    Special case: if masks were saved with allow_pickle=True and SAM3 produced
+    None entries for undetected frames, the stored dtype will be 'object'.
+    np.frombuffer cannot reconstruct object arrays from raw bytes, so we fall
+    back to np.load for those files.
+
     Yields:
         (i, left_mask_i, right_mask_i, N_frames)
     """
@@ -185,6 +190,31 @@ def stream_mask_frames(masks_path):
             yield i, np.array(lm[i]), np.array(rm[i]), len(lm)
         return
 
+    # ── Peek at dtype before committing to a streaming path ───────────────
+    # SAM3 saves masks with allow_pickle=True; when some frames had no
+    # detection the array dtype is 'object' (contains None entries).
+    # np.frombuffer cannot reconstruct object arrays from raw bytes, so we
+    # must fall back to np.load for those.  For numeric dtypes (bool, uint8
+    # etc.) we stream frame-by-frame without loading the whole array.
+    with zipfile.ZipFile(masks_path, "r") as z_peek:
+        with z_peek.open("left_masks.npy") as fp:
+            peek_shape, peek_dtype = _parse_npy_header(fp)
+
+    if peek_dtype == object:
+        # Object arrays require pickle — np.load is unavoidable.
+        # These are typically very sparse (None + small bool arrays) so they
+        # compress well and are not the primary GB culprit; but we still
+        # iterate frame-by-frame to avoid keeping two big object arrays alive
+        # at the same time as the streaming flow data.
+        print("  [stream_mask_frames] object-dtype masks → np.load fallback")
+        data = np.load(masks_path, allow_pickle=True)
+        lm, rm = data["left_masks"], data["right_masks"]
+        N = len(lm)
+        for i in range(N):
+            yield i, lm[i], rm[i], N
+        return
+
+    # ── Numeric dtype: true frame-by-frame streaming ───────────────────────
     # Two independent file handles → two independent decompressors → no shared state
     with zipfile.ZipFile(masks_path, "r") as zl, \
          zipfile.ZipFile(masks_path, "r") as zr:
