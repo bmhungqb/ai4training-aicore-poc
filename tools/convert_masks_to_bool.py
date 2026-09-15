@@ -15,6 +15,8 @@ from __future__ import annotations
 import argparse
 import gc
 import io
+import os
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -22,26 +24,54 @@ import numpy as np
 
 
 def _write_array(zf: zipfile.ZipFile, name: str, arr: np.ndarray) -> None:
-    """Write a single ndarray into an open zip as a .npy entry (streams one array at a time)."""
+    """Write a single small ndarray into an open zip as a .npy entry (in-memory, for
+    small metadata arrays only — do not use for full (N,H,W) mask arrays)."""
     buf = io.BytesIO()
     np.save(buf, arr)
     zf.writestr(name, buf.getvalue())
     buf.close()
 
 
-def _build_dense_side(obj_arr, N: int, H: int, W: int) -> np.ndarray:
-    """Build a dense (N, H, W) bool array from one side's object array of 2D masks/None."""
-    dense = np.zeros((N, H, W), dtype=bool)
-    for i in range(N):
-        m = obj_arr[i]
-        if m is not None and isinstance(m, np.ndarray) and m.ndim == 2:
-            if m.shape == (H, W):
-                dense[i] = m.astype(bool)
-            else:
-                import cv2
-                dense[i] = cv2.resize(m.astype(np.uint8), (W, H),
-                                       interpolation=cv2.INTER_NEAREST).astype(bool)
-    return dense
+def _build_and_write_dense_side(zf: zipfile.ZipFile, name: str, obj_arr, N: int, H: int, W: int) -> None:
+    """Build a dense (N, H, W) bool array from one side's object array of 2D masks/None.
+
+    The dense array is backed by a disk-mapped temp .npy file (via np.lib.format.open_memmap)
+    instead of a fresh in-RAM np.zeros allocation, so peak RAM only holds the source object
+    array (already-decoded per-frame bool masks) plus small per-frame temporaries -- not a
+    second full (N, H, W) copy in memory. The temp file is then streamed into the output zip
+    in chunks and deleted.
+    """
+    tmp_fd, tmp_npy_path = tempfile.mkstemp(suffix=".npy")
+    os.close(tmp_fd)
+    try:
+        dense = np.lib.format.open_memmap(tmp_npy_path, mode="w+", dtype=bool, shape=(N, H, W))
+        for i in range(N):
+            m = obj_arr[i]
+            if m is not None and isinstance(m, np.ndarray) and m.ndim == 2:
+                if m.shape == (H, W):
+                    dense[i] = m.astype(bool)
+                else:
+                    import cv2
+                    dense[i] = cv2.resize(m.astype(np.uint8), (W, H),
+                                           interpolation=cv2.INTER_NEAREST).astype(bool)
+        dense.flush()
+        del dense
+        gc.collect()
+
+        # Stream the memmapped .npy file straight into the zip without loading it whole.
+        # force_zip64=True is required since these dense mask arrays commonly exceed 2GB.
+        zinfo = zipfile.ZipInfo(name)
+        zinfo.compress_type = zf.compression
+        with open(tmp_npy_path, "rb") as f, zf.open(zinfo, "w", force_zip64=True) as zdst:
+            chunk = f.read(1024 * 1024 * 16)
+            while chunk:
+                zdst.write(chunk)
+                chunk = f.read(1024 * 1024 * 16)
+    finally:
+        try:
+            os.unlink(tmp_npy_path)
+        except OSError:
+            pass
 
 
 def needs_conversion(masks_path: Path) -> tuple[bool, str]:
@@ -149,20 +179,14 @@ def convert_masks(masks_path: Path, dry_run: bool = False) -> bool:
                     print(f"    ERROR: cannot determine H, W for {masks_path}")
                     return False
 
-            left_arr = _build_dense_side(left_obj, N, H, W)
+            _build_and_write_dense_side(zf, "left_masks.npy", left_obj, N, H, W)
             del left_obj
-            gc.collect()
-            _write_array(zf, "left_masks.npy", left_arr)
-            del left_arr
             gc.collect()
 
             # --- RIGHT side: load only now, after left is fully freed ---
             right_obj = data["right_masks"]
-            right_arr = _build_dense_side(right_obj, N, H, W)
+            _build_and_write_dense_side(zf, "right_masks.npy", right_obj, N, H, W)
             del right_obj
-            gc.collect()
-            _write_array(zf, "right_masks.npy", right_arr)
-            del right_arr
             gc.collect()
 
             extras["width"] = np.int32(W)
