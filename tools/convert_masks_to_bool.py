@@ -14,10 +14,34 @@ Usage:
 from __future__ import annotations
 import argparse
 import gc
+import io
 import zipfile
 from pathlib import Path
 
 import numpy as np
+
+
+def _write_array(zf: zipfile.ZipFile, name: str, arr: np.ndarray) -> None:
+    """Write a single ndarray into an open zip as a .npy entry (streams one array at a time)."""
+    buf = io.BytesIO()
+    np.save(buf, arr)
+    zf.writestr(name, buf.getvalue())
+    buf.close()
+
+
+def _build_dense_side(obj_arr, N: int, H: int, W: int) -> np.ndarray:
+    """Build a dense (N, H, W) bool array from one side's object array of 2D masks/None."""
+    dense = np.zeros((N, H, W), dtype=bool)
+    for i in range(N):
+        m = obj_arr[i]
+        if m is not None and isinstance(m, np.ndarray) and m.ndim == 2:
+            if m.shape == (H, W):
+                dense[i] = m.astype(bool)
+            else:
+                import cv2
+                dense[i] = cv2.resize(m.astype(np.uint8), (W, H),
+                                       interpolation=cv2.INTER_NEAREST).astype(bool)
+    return dense
 
 
 def needs_conversion(masks_path: Path) -> tuple[bool, str]:
@@ -91,54 +115,42 @@ def convert_masks(masks_path: Path, dry_run: bool = False) -> bool:
             print(f"    ERROR: cannot determine H, W for {masks_path}")
             return False
 
-    print(f"    N={N}, H={H}, W={W} → allocating {N * H * W * 2 / 1024 / 1024:.1f} MB bool arrays")
+    print(f"    N={N}, H={H}, W={W} → streaming conversion (one side at a time)")
 
-    # Build dense bool arrays
-    left_arr = np.zeros((N, H, W), dtype=bool)
-    right_arr = np.zeros((N, H, W), dtype=bool)
-
-    for i in range(N):
-        lm = left_obj[i]
-        rm = right_obj[i]
-        if lm is not None and isinstance(lm, np.ndarray) and lm.ndim == 2:
-            if lm.shape == (H, W):
-                left_arr[i] = lm.astype(bool)
-            else:
-                import cv2
-                left_arr[i] = cv2.resize(lm.astype(np.uint8), (W, H),
-                                          interpolation=cv2.INTER_NEAREST).astype(bool)
-        if rm is not None and isinstance(rm, np.ndarray) and rm.ndim == 2:
-            if rm.shape == (H, W):
-                right_arr[i] = rm.astype(bool)
-            else:
-                import cv2
-                right_arr[i] = cv2.resize(rm.astype(np.uint8), (W, H),
-                                           interpolation=cv2.INTER_NEAREST).astype(bool)
-
-    del left_obj, right_obj
-    gc.collect()
-
-    # Build extra arrays with fallbacks
-    kwargs: dict = dict(
-        left_masks=left_arr,
-        right_masks=right_arr,
-    )
+    # Extra arrays with fallbacks (small, safe to build eagerly)
+    extras: dict = {}
     if left_scores is not None:
-        kwargs["left_scores"] = np.asarray(left_scores, dtype=np.float32)
+        extras["left_scores"] = np.asarray(left_scores, dtype=np.float32)
     if right_scores is not None:
-        kwargs["right_scores"] = np.asarray(right_scores, dtype=np.float32)
+        extras["right_scores"] = np.asarray(right_scores, dtype=np.float32)
     if frame_indices is not None:
-        kwargs["frame_indices"] = np.asarray(frame_indices, dtype=np.int64)
-    kwargs["fps"] = np.float32(fps_val)
-    kwargs["width"] = np.int32(W)
-    kwargs["height"] = np.int32(H)
+        extras["frame_indices"] = np.asarray(frame_indices, dtype=np.int64)
+    extras["fps"] = np.float32(fps_val)
+    extras["width"] = np.int32(W)
+    extras["height"] = np.int32(H)
 
-    # Write back to same path (atomic via temp file)
+    # Write back to same path (atomic via temp file), streaming one side's dense
+    # array into the zip at a time to avoid holding both left+right in RAM.
     tmp_path = masks_path.with_suffix(".tmp.npz")
     try:
-        np.savez_compressed(tmp_path, **kwargs)
-        del left_arr, right_arr
-        gc.collect()
+        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            left_arr = _build_dense_side(left_obj, N, H, W)
+            del left_obj
+            gc.collect()
+            _write_array(zf, "left_masks.npy", left_arr)
+            del left_arr
+            gc.collect()
+
+            right_arr = _build_dense_side(right_obj, N, H, W)
+            del right_obj
+            gc.collect()
+            _write_array(zf, "right_masks.npy", right_arr)
+            del right_arr
+            gc.collect()
+
+            for name, arr in extras.items():
+                _write_array(zf, f"{name}.npy", arr)
+
         tmp_path.replace(masks_path)
         print(f"    ✓ Converted → {masks_path}")
         return True
