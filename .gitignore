@@ -11,6 +11,7 @@ __pycache__/
 
 # data and outputs
 data/
+data_old/
 data_sp1/
 data_result/
 /tmp

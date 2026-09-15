@@ -5,7 +5,10 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import torch
+try:
+    import torch
+except ImportError:
+    torch = None
 
 from config import PipelineConfig
 
@@ -169,7 +172,7 @@ def run_step1_segmentation(video_path: Path, output_dir: Path, config: PipelineC
         # Periodic memory reset to prevent GPU VRAM accumulation on long videos
         if processed > 0 and processed % reset_interval == 0:
             del inference_session
-            if torch.cuda.is_available():
+            if torch is not None and torch.cuda.is_available():
                 torch.cuda.empty_cache()
             gc.collect()
             inference_session = _create_fresh_session()
@@ -215,7 +218,7 @@ def run_step1_segmentation(video_path: Path, output_dir: Path, config: PipelineC
     # Free SAM3 model, processor, and inference session BEFORE saving to reclaim GBs of RAM
     del inference_session, model, processor
     gc.collect()
-    if torch.cuda.is_available():
+    if torch is not None and torch.cuda.is_available():
         torch.cuda.empty_cache()
 
     # Convert masks to clean contiguous boolean arrays to avoid Python pickle memory explosion
@@ -393,7 +396,7 @@ def run_step2_optical_flow(video_path: Path, masks_path: Path,
 
     del raft
     gc.collect()
-    if torch.cuda.is_available():
+    if torch is not None and torch.cuda.is_available():
         torch.cuda.empty_cache()
 
     return flow_path
