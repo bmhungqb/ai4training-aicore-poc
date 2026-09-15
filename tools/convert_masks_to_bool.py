@@ -79,11 +79,12 @@ def convert_masks(masks_path: Path, dry_run: bool = False) -> bool:
     if dry_run:
         return True
 
-    # Load with allow_pickle to get the object arrays
+    # Open lazily; np.load on a .npz is a lazy zipfile reader, but each array key
+    # is only decoded from pickle once accessed. We deliberately access left_masks
+    # and right_masks one at a time (never both alive simultaneously) to keep peak
+    # RAM to roughly one side's worth of object-array + dense-array data.
     try:
         data = np.load(masks_path, allow_pickle=True)
-        left_obj = data["left_masks"]    # shape (N,) object or (N, H, W)
-        right_obj = data["right_masks"]  # shape (N,) object or (N, H, W)
         left_scores = data.get("left_scores", None)
         right_scores = data.get("right_scores", None)
         frame_indices = data.get("frame_indices", None)
@@ -94,28 +95,31 @@ def convert_masks(masks_path: Path, dry_run: bool = False) -> bool:
         print(f"    ERROR loading {masks_path}: {e}")
         return False
 
+    # Detect N, H, W by peeking at left_masks only (freed right after).
+    try:
+        left_obj = data["left_masks"]  # shape (N,) object or (N, H, W)
+    except Exception as e:
+        print(f"    ERROR loading left_masks from {masks_path}: {e}")
+        return False
+
     N = len(left_obj)
     if N == 0:
         print(f"    WARNING: empty masks file {masks_path}, skipping")
+        del left_obj
+        gc.collect()
         return True
 
-    # Detect H, W from the first non-None mask
     H, W = None, None
     for i in range(N):
-        m = left_obj[i] if left_obj[i] is not None else right_obj[i]
+        m = left_obj[i]
         if m is not None and isinstance(m, np.ndarray) and m.ndim == 2:
             H, W = m.shape
             break
 
-    if H is None or W is None:
-        # Try from metadata
-        if height_val is not None and width_val is not None:
-            H, W = int(height_val), int(width_val)
-        else:
-            print(f"    ERROR: cannot determine H, W for {masks_path}")
-            return False
+    if (H is None or W is None) and height_val is not None and width_val is not None:
+        H, W = int(height_val), int(width_val)
 
-    print(f"    N={N}, H={H}, W={W} → streaming conversion (one side at a time)")
+    print(f"    N={N}, H={H if H else '?'}, W={W if W else '?'} → streaming conversion (one side at a time)")
 
     # Extra arrays with fallbacks (small, safe to build eagerly)
     extras: dict = {}
@@ -126,14 +130,25 @@ def convert_masks(masks_path: Path, dry_run: bool = False) -> bool:
     if frame_indices is not None:
         extras["frame_indices"] = np.asarray(frame_indices, dtype=np.int64)
     extras["fps"] = np.float32(fps_val)
-    extras["width"] = np.int32(W)
-    extras["height"] = np.int32(H)
 
-    # Write back to same path (atomic via temp file), streaming one side's dense
-    # array into the zip at a time to avoid holding both left+right in RAM.
     tmp_path = masks_path.with_suffix(".tmp.npz")
     try:
         with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            # --- LEFT side: already loaded above ---
+            if H is None or W is None:
+                # Still unknown (no mask found in left); try right_masks to detect.
+                right_obj_peek = data["right_masks"]
+                for i in range(len(right_obj_peek)):
+                    m = right_obj_peek[i]
+                    if m is not None and isinstance(m, np.ndarray) and m.ndim == 2:
+                        H, W = m.shape
+                        break
+                del right_obj_peek
+                gc.collect()
+                if H is None or W is None:
+                    print(f"    ERROR: cannot determine H, W for {masks_path}")
+                    return False
+
             left_arr = _build_dense_side(left_obj, N, H, W)
             del left_obj
             gc.collect()
@@ -141,6 +156,8 @@ def convert_masks(masks_path: Path, dry_run: bool = False) -> bool:
             del left_arr
             gc.collect()
 
+            # --- RIGHT side: load only now, after left is fully freed ---
+            right_obj = data["right_masks"]
             right_arr = _build_dense_side(right_obj, N, H, W)
             del right_obj
             gc.collect()
@@ -148,6 +165,8 @@ def convert_masks(masks_path: Path, dry_run: bool = False) -> bool:
             del right_arr
             gc.collect()
 
+            extras["width"] = np.int32(W)
+            extras["height"] = np.int32(H)
             for name, arr in extras.items():
                 _write_array(zf, f"{name}.npy", arr)
 
